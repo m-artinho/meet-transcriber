@@ -1,0 +1,745 @@
+#!/usr/bin/python3
+"""meet: local meeting recorder + transcriber.
+
+  meet start <initiative> [--keep-audio]
+  meet stop [--title T] [--tags a,b] [--keep-audio] [--wait]
+  meet status
+  meet retry [recording-id] [--wait]
+  meet doctor            check the setup and list input devices
+
+Config: ~/.config/meet/config (KEY=VALUE); environment variables override it.
+"""
+
+import argparse
+import array
+import datetime as dt
+import difflib
+import json
+import math
+import os
+import re
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import time
+import traceback
+import unicodedata
+import wave
+from pathlib import Path
+
+ROOT = Path(os.path.realpath(__file__)).parent
+CAPTURE_BIN = ROOT / "bin" / "meet-capture"
+DATA = Path.home() / "Library" / "Application Support" / "meet"
+RECORDINGS = DATA / "recordings"
+CURRENT = DATA / "current.json"
+LOG = Path.home() / "Library" / "Logs" / "meet" / "meet.log"
+CONFIG_FILE = Path.home() / ".config" / "meet" / "config"
+
+TIMESTAMP_EVERY = 30.0  # seconds between [hh:mm:ss] markers
+JOIN_GAP = 2.0          # join same-speaker segments closer than this
+BLEED_RUN = 4           # word runs this long echoed from "Them" are removed from "Me"
+BLEED_SHARE = 0.6       # "Me" segments with this share of words echoed from "Them" are dropped
+BLEED_QUIET = 0.5       # "Me" overlapping "Them" at < this x your normal loudness is dropped
+
+
+# ---------------------------------------------------------------- utilities
+
+def load_config():
+    cfg = {
+        "MEET_INBOX": "",
+        "MEET_MODEL": str(DATA / "models" / "ggml-large-v3-turbo.bin"),
+        "MEET_VAD_MODEL": str(DATA / "models" / "ggml-silero-v5.1.2.bin"),
+        "MEET_KEEP_AUDIO": "0",
+        "MEET_THREADS": "8",
+        "MEET_MIC": "",  # part of an input device name, e.g. "C922"; empty = system default input
+        # Initial prompt: a punctuated sentence keeps whisper from drifting into
+        # lowercase/no-punctuation output. Write it in the language(s) your meetings use.
+        "MEET_PROMPT": "Hi everyone, let's get started.",
+        "MEET_WHISPER": shutil.which("whisper-cli") or "/opt/homebrew/bin/whisper-cli",
+    }
+    if CONFIG_FILE.exists():
+        for line in CONFIG_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = parse_value(v)
+    for k in list(cfg):
+        if os.environ.get(k):
+            cfg[k] = os.environ[k]
+    for k in ("MEET_INBOX", "MEET_MODEL", "MEET_VAD_MODEL", "MEET_WHISPER"):
+        if cfg[k]:
+            cfg[k] = os.path.expanduser(cfg[k])
+    return cfg
+
+
+def parse_value(v):
+    """KEY=VALUE value: "quoted" or 'quoted' (kept verbatim), else up to a # comment."""
+    v = v.strip()
+    if v[:1] in ("'", '"'):
+        end = v.rfind(v[0])  # last quote, so values may contain the quote character
+        return v[1:end] if end > 0 else v[1:]
+    return v.split(" #", 1)[0].strip()
+
+
+def truthy(v):
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def log(msg):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a") as f:
+        f.write(f"{dt.datetime.now().isoformat(timespec='seconds')} {msg}\n")
+
+
+def notify(title, message):
+    script = ["on run argv", "display notification (item 2 of argv) with title (item 1 of argv)", "end run"]
+    cmd = ["osascript"]
+    for line in script:
+        cmd += ["-e", line]
+    subprocess.run(cmd + [title, message], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def read_json(path, default=None):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path, obj):
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False))
+    os.replace(tmp, path)
+
+
+def update_info(rec_dir, **changes):
+    info = read_json(rec_dir / "info.json", {})
+    info.update(changes)
+    write_json(rec_dir / "info.json", info)
+    return info
+
+
+def pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def slugify(text, max_len=60):
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    text = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
+    return text[:max_len].strip("-")
+
+
+def tagify(text):
+    """Obsidian tag: keeps accents (#migração), no spaces or punctuation.
+    Purely numeric tags aren't valid in Obsidian, so they become ""."""
+    tag = re.sub(r"[^\w/-]+", "-", text.lower()).strip("-/")
+    return "" if tag.replace("-", "").replace("/", "").isdigit() else tag
+
+
+def hms(seconds):
+    s = int(max(0, seconds))
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def parse_time(s):
+    return dt.datetime.fromisoformat(s) if s else None
+
+
+def fail(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+# ---------------------------------------------------------------- audio
+
+def repair_wav(path):
+    """Fix RIFF/data sizes if the recorder died before finalizing the header."""
+    size = path.stat().st_size
+    with path.open("r+b") as f:
+        head = f.read(12)
+        if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+            return
+        pos = 12
+        while pos + 8 <= size:
+            f.seek(pos)
+            cid, csize = struct.unpack("<4sI", f.read(8))
+            if cid == b"data":
+                real = size - pos - 8
+                if csize != real:
+                    f.seek(pos + 4)
+                    f.write(struct.pack("<I", real))
+                    f.seek(4)
+                    f.write(struct.pack("<I", size - 8))
+                    log(f"repaired WAV header: {path}")
+                return
+            pos += 8 + csize + (csize & 1)
+
+
+def wav_seconds(path):
+    try:
+        return max(0, path.stat().st_size - 44) / (16000 * 2)
+    except OSError:
+        return 0.0
+
+
+# ---------------------------------------------------------------- transcription
+
+HALLUCINATIONS = re.compile(
+    r"amara\.org|thanks for watching|subscribe|inscreva-se|legendas pela comunidade|"
+    r"^\W*[\[(][^\])]*[\])]\W*$",  # "[Music]", "(música)", "[BLANK_AUDIO]"
+    re.IGNORECASE,
+)
+
+
+def transcribe_track(cfg, rec_dir, track, offset):
+    wav = rec_dir / f"{track}.wav"
+    if not wav.exists() or wav_seconds(wav) < 0.5:
+        return [], None
+    repair_wav(wav)
+    for key in ("MEET_MODEL", "MEET_VAD_MODEL", "MEET_WHISPER"):
+        if not Path(cfg[key]).exists():
+            raise RuntimeError(f"{key} not found: {cfg[key]}")
+    out = rec_dir / track
+    cmd = [
+        cfg["MEET_WHISPER"], "-m", cfg["MEET_MODEL"], "-f", str(wav),
+        "-l", "auto", "--vad", "-vm", cfg["MEET_VAD_MODEL"], "-vsd", "500", "-vp", "200",
+        "-t", cfg["MEET_THREADS"], "-sns", "-ojf", "-of", str(out), "-np",
+        "-mc", "64",  # limit carried-over context: stops repetition loops, keeps the prompt
+    ]
+    if cfg["MEET_PROMPT"]:
+        cmd += ["--prompt", cfg["MEET_PROMPT"]]
+    t0 = time.time()
+    p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"whisper-cli failed on {track} (exit {p.returncode}): {p.stderr.strip()[-800:]}")
+    data = read_json(out.with_suffix(".json"))
+    if data is None:
+        raise RuntimeError(f"whisper-cli produced no JSON for {track}")
+    log(f"transcribed {track} ({wav_seconds(wav):.0f}s audio) in {time.time() - t0:.1f}s")
+    segs = []
+    for s in data.get("transcription", []):
+        text = s.get("text", "").strip()
+        if not text or HALLUCINATIONS.search(text):
+            continue
+        segs.append({
+            "start": offset + s["offsets"]["from"] / 1000,
+            "end": offset + s["offsets"]["to"] / 1000,
+            "text": text,
+        })
+    kept = collapse_repeats(segs)
+    if len(kept) < len(segs):
+        log(f"{track}: dropped {len(segs) - len(kept)} repeated segment(s)")
+    return kept, data.get("result", {}).get("language")
+
+
+def collapse_repeats(segs):
+    """Drop whisper repetition loops: a segment identical to the previous one, or a
+    4+ word line that already appeared twice in this track."""
+    out, seen, prev = [], {}, None
+    for s in segs:
+        key = " ".join(words(s["text"]))
+        n = seen.get(key, 0)
+        seen[key] = n + 1
+        repeat = key == prev or (len(key.split()) >= 4 and n >= 2)
+        prev = key
+        if not repeat:
+            out.append(s)
+    return out
+
+
+# ---------------------------------------------------------------- merge + markdown
+
+def words(text):
+    return re.findall(r"\w+", text.lower())
+
+
+def overlapping(seg, others, slack=1.0):
+    return [o for o in others if o["start"] - slack < seg["end"] and seg["start"] < o["end"] + slack]
+
+
+def echo_blocks(text_words, them_words):
+    sm = difflib.SequenceMatcher(None, text_words, them_words, autojunk=False)
+    return sm.get_matching_blocks()
+
+
+def remove_echoed_words(text, them_text):
+    """Strip "Them" speech echoed into a "Me" segment.
+
+    First removes runs of >= BLEED_RUN words also in the overlapping "Them" text,
+    then drops what's left if it is still mostly (>= BLEED_SHARE) echoed words.
+    """
+    them_words = words(them_text)
+    tokens = text.split()
+    flat = [(i, w) for i, tok in enumerate(tokens) for w in words(tok)]
+    removed = set()
+    for b in echo_blocks([w for _, w in flat], them_words):
+        if b.size >= BLEED_RUN:
+            removed.update(range(b.a, b.a + b.size))
+    if removed:
+        hit = {}
+        for k, (i, _) in enumerate(flat):
+            hit.setdefault(i, []).append(k in removed)
+        tokens = [tok for i, tok in enumerate(tokens) if not (hit.get(i) and all(hit[i]))]
+        text = " ".join(tokens).strip(" ,;:-–—")
+    rest = words(text)
+    if len(rest) < 2 and removed:
+        return ""
+    if rest and sum(b.size for b in echo_blocks(rest, them_words)) / len(rest) >= BLEED_SHARE:
+        return ""
+    return text
+
+
+def drop_bleed(me, them, mic_rms):
+    """Remove "Them" audio that leaked into the mic (speakers instead of headphones).
+
+    1. Word runs in a "Me" segment that repeat overlapping "Them" speech are removed.
+    2. A "Me" segment overlapping "Them" that is much quieter than your normal
+       speech is dropped (catches faint bleed whisper paraphrased or translated).
+    """
+    out = []
+    for m in me:
+        near = overlapping(m, them)
+        if near:
+            m = dict(m, text=remove_echoed_words(m["text"], " ".join(t["text"] for t in near)))
+        if m["text"]:
+            out.append(m)
+
+    clean = sorted(mic_rms(m) for m in out if not overlapping(m, them, slack=0))
+    if clean:
+        ref = clean[len(clean) // 2]
+        out = [m for m in out if not (overlapping(m, them, slack=0) and mic_rms(m) < BLEED_QUIET * ref)]
+    return out
+
+
+def make_rms(wav, offset):
+    """Return seg -> RMS of the mic audio under that segment (absolute times)."""
+    try:
+        with wave.open(str(wav)) as w:
+            raw, rate = w.readframes(w.getnframes()), w.getframerate()
+    except (OSError, wave.Error):
+        return lambda seg: 1.0
+
+    def rms(seg):
+        a = max(0, int((seg["start"] - offset) * rate)) * 2
+        b = max(a, int((seg["end"] - offset) * rate)) * 2
+        chunk = array.array("h", raw[a:b])
+        return math.sqrt(sum(x * x for x in chunk) / len(chunk)) / 32768 if chunk else 0.0
+
+    return rms
+
+
+STOPWORDS = {
+    "pt": set("não que é de para com uma um os as do da dos das em no na nos nas mas por isso "
+              "você vocês nós eu ele ela está estão então também muito já foi ser ter tem vai "
+              "o e é tudo bem sim aqui isso essa esse".split()),
+    "en": set("the and is to of that it you we they this with for are was be have but not "
+              "what so can will just i there about our your".split()),
+}
+
+
+def detect_languages(segs, whisper_langs):
+    counts = {}
+    for s in segs:
+        w = words(s["text"])
+        score = {lang: sum(x in sw for x in w) for lang, sw in STOPWORDS.items()}
+        best = max(score, key=score.get)
+        if score[best] >= 1 and score[best] > min(score.values()):
+            counts[best] = counts.get(best, 0) + 1
+    total = sum(counts.values())
+    langs = [l for l, c in sorted(counts.items(), key=lambda kv: -kv[1]) if c >= 2 or c / max(total, 1) >= 0.15]
+    for l in whisper_langs:  # whisper's per-track detection (only tracks that had speech)
+        if l and l not in langs:
+            langs.append(l)
+    return langs
+
+
+def build_body(segs):
+    segs = sorted(segs, key=lambda s: s["start"])
+    blocks = []  # [(marker_seconds, [[speaker, end, text], ...])]
+    for s in segs:
+        if not blocks or s["start"] - blocks[-1][0] >= TIMESTAMP_EVERY:
+            blocks.append((s["start"], []))
+        turns = blocks[-1][1]
+        if turns and turns[-1][0] == s["speaker"] and s["start"] - turns[-1][1] < JOIN_GAP:
+            turns[-1][1] = s["end"]
+            turns[-1][2] += " " + s["text"]
+        else:
+            turns.append([s["speaker"], s["end"], s["text"]])
+    out = []
+    for marker, turns in blocks:
+        out.append(f"**[{hms(marker)}]**\n")
+        for speaker, _, text in turns:
+            out.append(f"**{speaker}:** {text}\n")
+    return "\n".join(out) if out else "_No speech detected._\n"
+
+
+def yaml_str(s):
+    return json.dumps(s, ensure_ascii=False)
+
+
+def render_markdown(info, started, ended, segs, langs):
+    title = info.get("title") or info["initiative"]
+    tags = [info["initiative"]] + [t for t in info.get("tags", []) if t != info["initiative"]]
+    lang = langs[0] if len(langs) == 1 else ("[" + ", ".join(langs) + "]" if langs else "unknown")
+    fm = [
+        "---",
+        f"title: {yaml_str(title)}",
+        f"date: {started:%Y-%m-%d}",
+        f'start_time: "{started:%H:%M}"',
+        f'end_time: "{ended:%H:%M}"',
+        f'duration: "{hms((ended - started).total_seconds())}"',
+        f"initiative: {info['initiative']}",
+        f"language: {lang}",
+        "tags: [" + ", ".join(tags) + "]",
+        "source: local-recording",
+        "---",
+    ]
+    return "\n".join(fm) + f"\n\n# {title}\n\n" + " ".join("#" + t for t in tags) + "\n\n" + build_body(segs)
+
+
+def output_name(info, started):
+    name = f"{started:%Y-%m-%d_%H%M}_{info['initiative']}"
+    title_slug = slugify(info.get("title") or "")
+    if title_slug and title_slug != info["initiative"]:
+        name += "_" + title_slug
+    return name
+
+
+def write_atomic(inbox, name, text):
+    inbox.mkdir(parents=True, exist_ok=True)
+    path, n = inbox / f"{name}.md", 2
+    while path.exists():
+        path, n = inbox / f"{name}-{n}.md", n + 1
+    tmp = inbox / f".{path.name}.tmp"  # dotfile: ignored by Obsidian and most watchers
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def process(rec_dir):
+    """Transcribe a stopped recording, write markdown, clean up. Never raises."""
+    cfg = load_config()
+    info = update_info(rec_dir, status="transcribing", worker_pid=os.getpid(), error=None)
+    cap_log = rec_dir / "capture.log"
+    if cap_log.exists() and cap_log.read_text().strip():  # keep recorder diagnostics after cleanup
+        log(f"{rec_dir.name}: recorder log:\n  " + "\n  ".join(cap_log.read_text().strip().splitlines()[-40:]))
+    try:
+        if not cfg["MEET_INBOX"]:
+            raise RuntimeError("MEET_INBOX is not set (env var or ~/.config/meet/config)")
+        cap = read_json(rec_dir / "capture.json", {})
+        started = parse_time(cap.get("started_at") or info.get("started_at"))
+        ended = parse_time(cap.get("ended_at") or info.get("stopped_at"))
+        if ended is None:
+            ended = started + dt.timedelta(seconds=max(wav_seconds(rec_dir / "mic.wav"), wav_seconds(rec_dir / "system.wav")))
+        tracks = cap.get("tracks", {})
+
+        mic_offset = tracks.get("mic", {}).get("offset_sec", 0)
+        me, me_lang = transcribe_track(cfg, rec_dir, "mic", mic_offset)
+        them, them_lang = transcribe_track(cfg, rec_dir, "system", tracks.get("system", {}).get("offset_sec", 0))
+        before = [m["text"] for m in me]
+        me = drop_bleed(me, them, make_rms(rec_dir / "mic.wav", mic_offset))
+        if before != [m["text"] for m in me]:
+            log(f"{rec_dir.name}: removed speaker bleed from mic track ({len(before)} -> {len(me)} segments)")
+        segs = [dict(s, speaker="Me") for s in me] + [dict(s, speaker="Them") for s in them]
+
+        whisper_langs = [them_lang if them else None, me_lang if me else None]
+        md = render_markdown(info, started, ended, segs, detect_languages(segs, whisper_langs))
+        path = write_atomic(Path(cfg["MEET_INBOX"]), output_name(info, started), md)
+        log(f"{rec_dir.name}: wrote {path}")
+
+        if info.get("keep_audio") or truthy(cfg["MEET_KEEP_AUDIO"]):
+            update_info(rec_dir, status="done", transcript=str(path), worker_pid=None)
+        else:
+            shutil.rmtree(rec_dir)
+        notify("meet", f"✅ Transcript ready: {info.get('title') or info['initiative']}")
+        return path
+    except Exception as e:
+        log(f"{rec_dir.name}: FAILED\n{traceback.format_exc()}")
+        update_info(rec_dir, status="failed", error=str(e), worker_pid=None)
+        notify("meet", f"❌ Transcription failed — audio kept. Run: meet retry {rec_dir.name}")
+        return None
+
+
+def spawn_processor(rec_dir):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a") as logf:
+        proc = subprocess.Popen(
+            [sys.executable, str(Path(os.path.realpath(__file__))), "_process", str(rec_dir)],
+            stdin=subprocess.DEVNULL, stdout=logf, stderr=logf, start_new_session=True,
+        )
+    update_info(rec_dir, worker_pid=proc.pid)
+
+
+def run_processing(rec_dir, wait):
+    update_info(rec_dir, status="queued", worker_pid=None)
+    if wait:
+        print("Transcribing…")
+        path = process(rec_dir)
+        if path is None:
+            fail(f"Transcription failed; audio kept in {rec_dir}. Details: {LOG}")
+        print(f"Wrote {path}")
+    else:
+        spawn_processor(rec_dir)
+        print("Transcribing in the background — you'll get a notification when it's ready.")
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_start(args):
+    cur = read_json(CURRENT)
+    if cur:
+        if pid_alive(cur.get("pid")):
+            fail(f"Already recording '{cur['initiative']}'. Run `meet stop` first.")
+        fail("A previous recording ended unexpectedly. Run `meet stop` to transcribe what was captured.")
+    if not CAPTURE_BIN.exists():
+        fail(f"{CAPTURE_BIN} not found. Run {ROOT / 'build.sh'} first.")
+    cfg = load_config()
+    problems = setup_problems(cfg)
+    if problems:
+        fail("Not ready to record:\n  - " + "\n  - ".join(problems) + "\nRun `meet doctor` for details.")
+    kill_strays()
+    initiative = slugify(args.initiative)
+    if not initiative:
+        fail("Initiative slug must contain letters or digits.")
+
+    now = dt.datetime.now().astimezone()
+    rec_id = f"{now:%Y-%m-%d_%H%M%S}_{initiative}"
+    rec_dir = RECORDINGS / rec_id
+    rec_dir.mkdir(parents=True)
+    write_json(rec_dir / "info.json", {
+        "id": rec_id, "initiative": initiative, "status": "recording",
+        "started_at": now.isoformat(timespec="seconds"), "keep_audio": args.keep_audio,
+    })
+
+    out_path, err_path = rec_dir / "capture.out", rec_dir / "capture.log"
+    with out_path.open("w") as out, err_path.open("w") as err:
+        proc = subprocess.Popen([str(CAPTURE_BIN), str(rec_dir)], stdin=subprocess.DEVNULL,
+                                stdout=out, stderr=err, start_new_session=True,
+                                env=dict(os.environ, MEET_MIC=cfg["MEET_MIC"]))
+    deadline = time.time() + 60  # first run may wait on a permission prompt
+    while time.time() < deadline:
+        if "ready" in out_path.read_text():
+            break
+        if proc.poll() is not None:
+            shutil.rmtree(rec_dir, ignore_errors=True)
+            fail("Recorder failed to start: " + (err_path.read_text().strip() if err_path.exists() else "unknown error"))
+        time.sleep(0.1)
+    else:
+        kill_group(proc.pid)
+        shutil.rmtree(rec_dir, ignore_errors=True)
+        fail("Recorder did not start within 60s (a macOS permission prompt may be waiting).")
+
+    write_json(CURRENT, {"id": rec_id, "dir": str(rec_dir), "pid": proc.pid, "initiative": initiative,
+                         "started_at": now.isoformat(timespec="seconds")})
+    log(f"{rec_id}: recording started (pid {proc.pid})")
+    notify("meet", f"🔴 Recording: {initiative}")
+    print(f"🔴 Recording '{initiative}'. Run `meet stop` when the meeting ends.")
+
+
+def ask(prompt):
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def kill_group(pid):
+    """The recorder runs in its own process group (wrapper + disclaimed child)."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def kill_strays():
+    """Kill recorder processes left behind by an earlier crash."""
+    p = subprocess.run(["pgrep", "-f", str(CAPTURE_BIN)], capture_output=True, text=True)
+    for pid in p.stdout.split():
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+            log(f"killed stray recorder pid {pid}")
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
+
+
+def cmd_stop(args):
+    cur = read_json(CURRENT)
+    if not cur:
+        fail("Not recording.")
+    rec_dir = Path(cur["dir"])
+    pid = cur.get("pid")
+    stopped_at = dt.datetime.now().astimezone()
+    if pid_alive(pid):
+        print("Stopping…", flush=True)
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(100):
+            if not pid_alive(pid):
+                break
+            time.sleep(0.1)
+        else:
+            kill_group(pid)
+            log(f"{cur['id']}: recorder did not stop in 10s, killed")
+    kill_strays()
+    CURRENT.unlink()
+    log(f"{cur['id']}: recording stopped")
+
+    if not rec_dir.exists():
+        fail(f"Recording folder is missing: {rec_dir}")
+    started = parse_time(cur["started_at"])
+    update_info(rec_dir, status="stopped", stopped_at=stopped_at.isoformat(timespec="seconds"))
+    print(f"⏹  Stopped '{cur['initiative']}' after {hms((stopped_at - started).total_seconds())}.")
+
+    title, tags = args.title, args.tags
+    if sys.stdin.isatty():
+        try:
+            if title is None:
+                title = ask("Title (Enter to skip): ")
+            if tags is None:
+                tags = ask("Tags, comma or space separated (Enter to skip): ")
+        except KeyboardInterrupt:
+            print("\nSkipped title/tags.")
+    tag_list = [t for t in (tagify(x) for x in re.split(r"[,\s]+", (tags or "").replace("#", ""))) if t]
+    info = read_json(rec_dir / "info.json", {})
+    update_info(rec_dir, title=title or None, tags=tag_list,
+                keep_audio=bool(info.get("keep_audio") or args.keep_audio))
+    run_processing(rec_dir, args.wait)
+
+
+def cmd_status(args):
+    cur = read_json(CURRENT)
+    busy = False
+    if cur:
+        busy = True
+        if pid_alive(cur.get("pid")):
+            elapsed = (dt.datetime.now().astimezone() - parse_time(cur["started_at"])).total_seconds()
+            print(f"🔴 Recording '{cur['initiative']}' for {hms(elapsed)}")
+            print("   " + level_summary(Path(cur["dir"]), elapsed))
+        else:
+            print(f"⚠️  Recording '{cur['initiative']}' ended unexpectedly. Run `meet stop` to transcribe what was captured.")
+    for info_path in sorted(RECORDINGS.glob("*/info.json")):
+        info = read_json(info_path, {})
+        st = info.get("status")
+        if st in ("transcribing", "queued"):
+            if pid_alive(info.get("worker_pid")):
+                busy = True
+                print(f"⏳ Transcribing {info['id']}")
+            else:
+                print(f"❌ {info['id']}: transcription was interrupted. Run `meet retry {info['id']}`")
+        elif st == "stopped":
+            print(f"❌ {info['id']}: stopped but never transcribed. Run `meet retry {info['id']}`")
+        elif st == "failed":
+            print(f"❌ {info['id']}: failed ({info.get('error')}). Audio kept. Run `meet retry {info['id']}`")
+    if not busy:
+        print("Idle — not recording.")
+
+
+def level_summary(rec_dir, elapsed):
+    lv = read_json(rec_dir / "levels.json")
+    if not lv:
+        return "levels: waiting…"
+
+    def one(name, d):
+        if d["peak_max"] == 0:
+            return f"{name}: silent" + (" ⚠️ (permission?)" if elapsed > 15 else "")
+        if d.get("filled_recent", 0) > 0.2:
+            return f"{name}: ⚠️ dropping audio ({d['filled_recent']:.0%} gaps). See capture.log"
+        db = 20 * math.log10(d["peak_recent"]) if d["peak_recent"] > 0 else -120
+        rebuilt = f", rebuilt {d['rebuilds']}×" if d.get("rebuilds") else ""
+        return f"{name}: ok ({db:.0f} dB now{rebuilt})"
+
+    return " · ".join([one("mic", lv["mic"]), one("system", lv["system"])])
+
+
+def setup_problems(cfg):
+    """Things that would make a recording fail later; checked before recording."""
+    problems = []
+    if not CAPTURE_BIN.exists():
+        problems.append(f"recorder not built: run {ROOT / 'build.sh'}")
+    if not cfg["MEET_INBOX"]:
+        problems.append(f"MEET_INBOX is not set (in {CONFIG_FILE} or the environment)")
+    for key, hint in (("MEET_WHISPER", "brew install whisper-cpp"),
+                      ("MEET_MODEL", "run install.sh to download it"),
+                      ("MEET_VAD_MODEL", "run install.sh to download it")):
+        if not Path(cfg[key]).exists():
+            problems.append(f"{key} not found: {cfg[key]} ({hint})")
+    return problems
+
+
+def cmd_doctor(args):
+    cfg = load_config()
+    print(f"Config file: {CONFIG_FILE}" + ("" if CONFIG_FILE.exists() else " (missing; defaults in use)"))
+    for k in sorted(cfg):
+        print(f"  {k} = {cfg[k]}")
+    problems = setup_problems(cfg)
+    inbox = Path(cfg["MEET_INBOX"]) if cfg["MEET_INBOX"] else None
+    if inbox and inbox.exists() and not os.access(inbox, os.W_OK):
+        problems.append(f"inbox is not writable: {inbox}")
+    if inbox and "Mobile Documents" in str(inbox):
+        print("Note: the inbox is inside iCloud Drive, so transcripts sync to iCloud (audio never does).")
+    if CAPTURE_BIN.exists():
+        print("Input devices (* = system default; set MEET_MIC to part of a name to pick one):")
+        out = subprocess.run([str(CAPTURE_BIN), "--list-inputs"], capture_output=True, text=True).stdout
+        print("".join("  " + line + "\n" for line in out.splitlines()), end="")
+    if problems:
+        print("Problems:\n  - " + "\n  - ".join(problems))
+        sys.exit(1)
+    print("OK. Permissions can only be checked by recording: `meet start test`, talk, `meet status`, `meet stop`.")
+
+
+def cmd_retry(args):
+    if args.id:
+        rec_dir = RECORDINGS / args.id
+        if not rec_dir.exists():
+            fail(f"No recording {args.id}")
+    else:
+        cands = [p.parent for p in sorted(RECORDINGS.glob("*/info.json"))
+                 if read_json(p, {}).get("status") in ("failed", "stopped", "transcribing", "queued")
+                 and not pid_alive(read_json(p, {}).get("worker_pid"))]
+        if not cands:
+            fail("Nothing to retry.")
+        rec_dir = cands[-1]
+    print(f"Retrying {rec_dir.name}")
+    run_processing(rec_dir, args.wait)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="meet", description="Local meeting recorder + transcriber.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("start", help="start recording")
+    s.add_argument("initiative")
+    s.add_argument("--keep-audio", action="store_true", help="keep the WAV files after transcription")
+    s = sub.add_parser("stop", help="stop recording and transcribe")
+    s.add_argument("--title")
+    s.add_argument("--tags", help="comma or space separated")
+    s.add_argument("--keep-audio", action="store_true")
+    s.add_argument("--wait", action="store_true", help="transcribe in the foreground")
+    sub.add_parser("status", help="am I recording?")
+    sub.add_parser("doctor", help="check the setup and list input devices")
+    s = sub.add_parser("retry", help="re-run transcription for a failed recording")
+    s.add_argument("id", nargs="?")
+    s.add_argument("--wait", action="store_true")
+    s = sub.add_parser("_process")
+    s.add_argument("dir")
+    args = p.parse_args()
+
+    if args.cmd == "_process":
+        process(Path(args.dir))
+    else:
+        {"start": cmd_start, "stop": cmd_stop, "status": cmd_status, "retry": cmd_retry,
+         "doctor": cmd_doctor}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,30 @@
+# meet config: copy to ~/.config/meet/config (install.sh does this for you).
+# Format: KEY="value". Environment variables with the same name override these.
+
+# Where finished transcripts (.md) are written. Required.
+# Any folder works: an Obsidian vault folder, a notes inbox, a synced drive...
+MEET_INBOX="~/Documents/meeting-transcripts"
+
+# Mic to record: part of an input device name (e.g. "MacBook Pro Microphone",
+# "C922", "AirPods"). Empty = the Mac's default input. Use the same mic your
+# meeting app uses. `meet doctor` lists the device names.
+MEET_MIC=""
+
+# Initial prompt for whisper. A short, punctuated sentence in the language(s)
+# your meetings use keeps the output punctuated; names and jargon you use
+# often improve their spelling. Example for English + Portuguese:
+#   MEET_PROMPT="Olá, pessoal. Hi everyone, let's get started. Tudo bem?"
+MEET_PROMPT="Hi everyone, let's get started."
+
+# Keep the WAV files after a successful transcription (1/0).
+MEET_KEEP_AUDIO=0
+
+# whisper.cpp model and VAD model (install.sh downloads these).
+MEET_MODEL="~/Library/Application Support/meet/models/ggml-large-v3-turbo.bin"
+MEET_VAD_MODEL="~/Library/Application Support/meet/models/ggml-silero-v5.1.2.bin"
+
+# CPU threads for whisper (the heavy lifting runs on the GPU via Metal).
+MEET_THREADS=8
+
+# whisper-cli binary (auto-detected from PATH).
+# MEET_WHISPER=/opt/homebrew/bin/whisper-cli

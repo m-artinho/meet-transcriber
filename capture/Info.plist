@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>local.meet.capture</string>
+	<key>CFBundleName</key>
+	<string>meet-capture</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>meet records your microphone to transcribe your side of meetings locally.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>meet records system audio to transcribe the other side of meetings locally.</string>
+</dict>
+</plist>
