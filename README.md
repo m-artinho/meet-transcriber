@@ -58,7 +58,7 @@ meet status                 # recording for 00:12:34 · mic: ok · system: ok
 meet stop                   # asks for a title + tags, transcribes in the background, ✅ notification
 ```
 
-`billing-revamp` is a short slug for the project or topic. It goes into the filename, the frontmatter and the tags.
+`billing-revamp` is a short slug for the project or topic. It goes into the filename and the `initiative` frontmatter field. Tags are only the ones you type at `meet stop`; skip the prompt and the transcript has no tags.
 
 - `meet stop --title "Pricing sync" --tags "pricing, q4"` skips the prompts. Tags can be typed with or without `#`.
 - `meet stop --wait` transcribes in the foreground.
@@ -81,13 +81,13 @@ end_time: "15:02"
 duration: "00:32:14"
 initiative: billing-revamp
 language: [pt, en]
-tags: [billing-revamp, pricing, q4]
+tags: [pricing, q4]
 source: local-recording
 ---
 
 # Pricing sync
 
-#billing-revamp #pricing #q4
+#pricing #q4
 
 **[00:00:00]**
 

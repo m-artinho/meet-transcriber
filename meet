@@ -391,7 +391,7 @@ def yaml_str(s):
 
 def render_markdown(info, started, ended, segs, langs):
     title = info.get("title") or info["initiative"]
-    tags = [info["initiative"]] + [t for t in info.get("tags", []) if t != info["initiative"]]
+    tags = list(dict.fromkeys(info.get("tags") or []))  # only what the user typed at `meet stop`
     lang = langs[0] if len(langs) == 1 else ("[" + ", ".join(langs) + "]" if langs else "unknown")
     fm = [
         "---",
@@ -406,7 +406,8 @@ def render_markdown(info, started, ended, segs, langs):
         "source: local-recording",
         "---",
     ]
-    return "\n".join(fm) + f"\n\n# {title}\n\n" + " ".join("#" + t for t in tags) + "\n\n" + build_body(segs)
+    tag_line = " ".join("#" + t for t in tags) + "\n\n" if tags else ""
+    return "\n".join(fm) + f"\n\n# {title}\n\n" + tag_line + build_body(segs)
 
 
 def output_name(info, started):
