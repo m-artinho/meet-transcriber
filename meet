@@ -2,7 +2,8 @@
 """meet: local meeting recorder + transcriber.
 
   meet start <name> [--keep-audio]       e.g. meet start "Pricing sync"
-  meet stop [--tags a,b] [--keep-audio] [--wait]
+  meet stop [--tags a,b | --tags-later] [--keep-audio] [--wait]
+  meet tag [recording-id] --tags a,b     tags for a recording stopped with --tags-later
   meet status [--json]
   meet retry [recording-id] [--wait]
   meet doctor            check the setup and list input devices
@@ -50,7 +51,8 @@ TIMESTAMP_EVERY = 30.0  # seconds between [hh:mm:ss] markers
 JOIN_GAP = 2.0          # join same-speaker segments closer than this
 BLEED_RUN = 4           # word runs this long echoed from "Them" are removed from "Me"
 BLEED_SHARE = 0.6       # "Me" segments with this share of words echoed from "Them" are dropped
-BLEED_QUIET = 0.5       # "Me" overlapping "Them" at < this x your normal loudness is dropped
+BLEED_QUIET = 0.5
+TAG_WAIT = 10 * 60      # after a --tags-later stop, wait this long (from the stop) for `meet tag`       # "Me" overlapping "Them" at < this x your normal loudness is dropped
 
 
 # ---------------------------------------------------------------- utilities
@@ -155,6 +157,10 @@ def tagify(text):
     Purely numeric tags aren't valid in Obsidian, so they become ""."""
     tag = re.sub(r"[^\w/-]+", "-", text.lower()).strip("-/")
     return "" if tag.replace("-", "").replace("/", "").isdigit() else tag
+
+
+def parse_tags(text):
+    return list(dict.fromkeys(t for t in (tagify(x) for x in re.split(r"[,\s]+", (text or "").replace("#", ""))) if t))
 
 
 def hms(seconds):
@@ -472,6 +478,10 @@ def process(rec_dir):
             log(f"{rec_dir.name}: removed speaker bleed from mic track ({len(before)} -> {len(me)} segments)")
         segs = [dict(s, speaker="Me") for s in me] + [dict(s, speaker="Them") for s in them]
 
+        if read_json(rec_dir / "info.json", {}).get("awaiting_tags"):
+            wait_for_tags(rec_dir)
+        info = read_json(rec_dir / "info.json", info)  # tags may have been added meanwhile
+
         whisper_langs = [them_lang if them else None, me_lang if me else None]
         md = render_markdown(info, started, ended, segs, detect_languages(segs, whisper_langs))
         path = write_atomic(Path(cfg["MEET_INBOX"]), output_name(info, started), md)
@@ -495,6 +505,21 @@ def add_history(info, path):
     entry = {"name": info.get("title") or info.get("name") or info["initiative"], "path": str(path),
              "finished_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
     write_json(HISTORY, (read_json(HISTORY, []) + [entry])[-20:])
+
+
+def wait_for_tags(rec_dir):
+    """Transcription is done: hold the transcript until `meet tag` sets the tags,
+    at most TAG_WAIT after the recording stopped; then write it without tags."""
+    update_info(rec_dir, status="awaiting-tags")
+    stopped = parse_time(read_json(rec_dir / "info.json", {}).get("stopped_at")) or dt.datetime.now().astimezone()
+    deadline = stopped + dt.timedelta(seconds=TAG_WAIT)
+    while read_json(rec_dir / "info.json", {}).get("awaiting_tags"):
+        if dt.datetime.now().astimezone() >= deadline:
+            update_info(rec_dir, awaiting_tags=False)
+            log(f"{rec_dir.name}: no tags after {TAG_WAIT // 60} min, writing without tags")
+            break
+        time.sleep(1)
+    update_info(rec_dir, status="transcribing")
 
 
 def spawn_processor(rec_dir):
@@ -627,14 +652,13 @@ def cmd_stop(args):
     print(f"⏹  Stopped '{cur['initiative']}' after {hms((stopped_at - started).total_seconds())}.")
 
     tags = args.tags
-    if tags is None and sys.stdin.isatty():
+    if tags is None and not args.tags_later and sys.stdin.isatty():
         try:
             tags = ask("Tags, comma or space separated (Enter to skip): ")
         except KeyboardInterrupt:
             print("\nSkipped tags.")
-    tag_list = [t for t in (tagify(x) for x in re.split(r"[,\s]+", (tags or "").replace("#", ""))) if t]
     info = read_json(rec_dir / "info.json", {})
-    update_info(rec_dir, tags=tag_list,
+    update_info(rec_dir, tags=parse_tags(tags), awaiting_tags=bool(args.tags_later and tags is None),
                 keep_audio=bool(info.get("keep_audio") or args.keep_audio))
     run_processing(rec_dir, args.wait)
 
@@ -655,14 +679,16 @@ def status_data():
     for info_path in sorted(RECORDINGS.glob("*/info.json")):
         info = read_json(info_path, {})
         st = info.get("status")
-        if st in ("transcribing", "queued"):
-            st = "transcribing" if pid_alive(info.get("worker_pid")) else "interrupted"
+        if st in ("transcribing", "queued", "awaiting-tags"):
+            st = st if st != "queued" else "transcribing"
+            st = st if pid_alive(info.get("worker_pid")) else "interrupted"
         elif st == "stopped":
             st = "stopping" if pid_alive(info.get("stopper_pid")) else "stopped"  # stopping = tags prompt open
         elif st != "failed":
             continue
         jobs.append({"id": info["id"], "name": info.get("name") or info.get("initiative", info["id"]),
-                     "state": st, "error": info.get("error")})
+                     "state": st, "error": info.get("error"), "stopped_at": info.get("stopped_at"),
+                     "awaiting_tags": bool(info.get("awaiting_tags")) and st in ("transcribing", "awaiting-tags")})
     recent = list(reversed(read_json(HISTORY, [])))[:5]
     return {"recording": rec, "jobs": jobs, "recent": recent, "inbox": cfg["MEET_INBOX"]}
 
@@ -681,7 +707,9 @@ def cmd_status(args):
             print(f"⚠️  Recording '{rec['name']}' ended unexpectedly. Run `meet stop` to transcribe what was captured.")
     for job in data["jobs"]:
         jid = job["id"]
-        if job["state"] == "transcribing":
+        if job["awaiting_tags"]:
+            print(f"🏷  {jid}: waiting for tags. Run `meet tag --tags \"a, b\"` (or --tags \"\" for none)")
+        elif job["state"] == "transcribing":
             print(f"⏳ Transcribing {jid}")
         elif job["state"] == "stopping":
             print(f"⏹  Stopping {jid} (waiting for tags)")
@@ -691,7 +719,7 @@ def cmd_status(args):
             print(f"❌ {jid}: stopped but never transcribed. Run `meet retry {jid}`")
         else:
             print(f"❌ {jid}: failed ({job['error']}). Audio kept. Run `meet retry {jid}`")
-    if not rec and not any(j["state"] in ("transcribing", "stopping") for j in data["jobs"]):
+    if not rec and not any(j["state"] in ("transcribing", "stopping", "awaiting-tags") for j in data["jobs"]):
         print("Idle — not recording.")
 
 
@@ -750,6 +778,22 @@ def cmd_doctor(args):
     print("OK. Permissions can only be checked by recording: `meet start test`, talk, `meet status`, `meet stop`.")
 
 
+def cmd_tag(args):
+    if args.id:
+        rec_dir = RECORDINGS / args.id
+    else:
+        waiting = [p.parent for p in sorted(RECORDINGS.glob("*/info.json")) if read_json(p, {}).get("awaiting_tags")]
+        if not waiting:
+            fail("No recording is waiting for tags.")
+        rec_dir = waiting[-1]
+    info = read_json(rec_dir / "info.json")
+    if not info or not info.get("awaiting_tags"):
+        fail(f"{rec_dir.name} isn't waiting for tags (the transcript may already be written).")
+    tags = parse_tags(args.tags)
+    update_info(rec_dir, tags=tags, awaiting_tags=False)
+    print(f"Tags for '{info.get('name') or info['initiative']}': " + (" ".join("#" + t for t in tags) or "none"))
+
+
 def busy_elsewhere(info):
     """Another process is stopping or transcribing this recording right now."""
     return pid_alive(info.get("worker_pid")) or (info.get("status") == "stopped" and pid_alive(info.get("stopper_pid")))
@@ -765,7 +809,7 @@ def cmd_retry(args):
             fail(f"{args.id} is still being recorded, stopped or transcribed.")
     else:
         cands = [p.parent for p in sorted(RECORDINGS.glob("*/info.json"))
-                 if read_json(p, {}).get("status") in ("failed", "stopped", "transcribing", "queued")
+                 if read_json(p, {}).get("status") in ("failed", "stopped", "transcribing", "queued", "awaiting-tags")
                  and not busy_elsewhere(read_json(p, {}))]
         if not cands:
             fail("Nothing to retry.")
@@ -782,8 +826,13 @@ def main():
     s.add_argument("--keep-audio", action="store_true", help="keep the WAV files after transcription")
     s = sub.add_parser("stop", help="stop recording and transcribe")
     s.add_argument("--tags", help="comma or space separated")
+    s.add_argument("--tags-later", action="store_true",
+                   help="don't ask now; the transcript waits (up to 10 min) for `meet tag`")
     s.add_argument("--keep-audio", action="store_true")
     s.add_argument("--wait", action="store_true", help="transcribe in the foreground")
+    s = sub.add_parser("tag", help="set tags for a recording stopped with --tags-later")
+    s.add_argument("id", nargs="?", help="recording id (default: the latest one waiting)")
+    s.add_argument("--tags", default="", help='comma or space separated; "" for none')
     s = sub.add_parser("status", help="am I recording?")
     s.add_argument("--json", action="store_true", help="machine-readable output")
     sub.add_parser("doctor", help="check the setup and list input devices")
@@ -798,7 +847,7 @@ def main():
         process(Path(args.dir))
     else:
         {"start": cmd_start, "stop": cmd_stop, "status": cmd_status, "retry": cmd_retry,
-         "doctor": cmd_doctor}[args.cmd](args)
+         "doctor": cmd_doctor, "tag": cmd_tag}[args.cmd](args)
 
 
 if __name__ == "__main__":

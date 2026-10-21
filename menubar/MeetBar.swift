@@ -39,8 +39,10 @@ struct Recording: Decodable {
 struct Job: Decodable, Identifiable {
     let id: String
     let name: String
-    let state: String // stopping | transcribing | interrupted | stopped | failed
+    let state: String // stopping | transcribing | awaiting-tags | interrupted | stopped | failed
     let error: String?
+    let stopped_at: String?
+    let awaiting_tags: Bool?
 }
 
 struct Recent: Decodable, Identifiable {
@@ -141,6 +143,18 @@ final class Model: ObservableObject {
 
     var recording: Recording? { status?.recording }
     var isRecording: Bool { recording?.alive == true }
+    /// A stopped recording whose transcript is waiting for tags (the step after Stop).
+    var awaitingTags: Job? { status?.jobs.first { $0.awaiting_tags == true } }
+    /// Called when a recording starts waiting for tags, so the app can show the tags step.
+    var onTagsNeeded: (() -> Void)?
+    private var askedForTags: Set<String> = []
+
+    /// Seconds until the transcript is written without tags.
+    func tagsDeadline(_ job: Job) -> TimeInterval? {
+        guard let s = job.stopped_at, let stopped = iso.date(from: s) else { return nil }
+        return max(0, 600 - now.timeIntervalSince(stopped))
+    }
+
     var isTranscribing: Bool { status?.jobs.contains { $0.state == "transcribing" || $0.state == "stopping" } == true }
     var isQuiet: Bool { isRecording && quietFor >= Model.quietAlert }
 
@@ -180,6 +194,10 @@ final class Model: ObservableObject {
 
     private func apply(_ s: Status) {
         status = s
+        if let job = awaitingTags, !askedForTags.contains(job.id) {
+            askedForTags.insert(job.id)
+            onTagsNeeded?()
+        }
         guard let r = s.recording, r.alive else {
             recordingID = nil
             quietFor = 0
@@ -221,7 +239,12 @@ final class Model: ObservableObject {
     }
 
     func start(_ name: String, done: @escaping () -> Void) { perform("Starting…", ["start", "--", name], onSuccess: done) }
-    func stop(tags: String, done: @escaping () -> Void) { perform("Stopping…", ["stop", "--tags=\(tags)"], onSuccess: done) }
+    /// Stop now; tags are asked for in the next step (the transcript waits for them).
+    func stop(done: @escaping () -> Void = {}) { perform("Stopping…", ["stop", "--tags-later"], onSuccess: done) }
+    func stop(tags: String) { perform("Stopping…", ["stop", "--tags=\(tags)"]) }
+    func tag(_ id: String, _ tags: String, done: @escaping () -> Void = {}) {
+        perform("Saving tags…", ["tag", id, "--tags=\(tags)"], onSuccess: done)
+    }
     func retry(_ id: String) { perform("Retrying…", ["retry", id]) }
 
     /// meetbar://start?name=…  /  meetbar://stop?tags=…
@@ -232,7 +255,8 @@ final class Model: ObservableObject {
         case "start":
             let name = value("name").trimmingCharacters(in: .whitespaces)
             if name.isEmpty { message = "meetbar://start needs ?name=…" } else { start(name) {} }
-        case "stop": stop(tags: value("tags")) {}
+        case "stop":
+            if items.contains(where: { $0.name == "tags" }) { stop(tags: value("tags")) } else { stop() }
         default: message = "Unknown URL: \(url.absoluteString)"
         }
     }
@@ -281,6 +305,7 @@ func menuBarContent(_ m: Model) -> (NSImage, String) {
                               m.isQuiet ? .systemOrange : .systemRed), " " + hms(m.elapsed))
     }
     if m.recording != nil { return (coloredSymbol("exclamationmark.triangle.fill", .systemOrange), "") }
+    if m.awaitingTags != nil { return (coloredSymbol("tag.fill", .systemOrange), "") }
     if m.isTranscribing { return (menuSymbol("hourglass"), "") }
     return (menuSymbol("mic"), "")
 }
@@ -325,13 +350,17 @@ struct Panel: View {
     @ObservedObject var model: Model
     @State private var name = ""
     @State private var tags = ""
-    @FocusState private var nameFocused: Bool
+    @FocusState private var focus: Field?
+    enum Field { case name, tags }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let r = model.recording {
                 if r.alive { recordingSection(r) } else { crashedSection(r) }
-            } else {
+            }
+            if let job = model.awaitingTags {
+                tagsSection(job)
+            } else if model.recording == nil {
                 idleSection
             }
             if let busy = model.busy {
@@ -356,7 +385,7 @@ struct Panel: View {
             Text("New recording").font(.headline)
             TextField("Meeting name", text: $name)
                 .textFieldStyle(.roundedBorder)
-                .focused($nameFocused)
+                .focused($focus, equals: .name)
                 .onSubmit(startIfValid)
             Button(action: startIfValid) {
                 Label("Start recording", systemImage: "record.circle").frame(maxWidth: .infinity)
@@ -365,8 +394,10 @@ struct Panel: View {
             .tint(.red)
             .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || model.busy != nil)
         }
-        .onAppear { nameFocused = true }
-        .onReceive(NotificationCenter.default.publisher(for: NSPopover.didShowNotification)) { _ in nameFocused = true }
+        .onAppear { focus = .name }
+        .onReceive(NotificationCenter.default.publisher(for: NSPopover.didShowNotification)) { _ in
+            if model.awaitingTags == nil { focus = .name }
+        }
     }
 
     private func startIfValid() {
@@ -390,30 +421,66 @@ struct Panel: View {
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }
-            TextField("Tags (optional, e.g. pricing, q4)", text: $tags).textFieldStyle(.roundedBorder)
             Button {
-                model.stop(tags: tags) { tags = "" }
+                model.stop()
             } label: {
-                Label("Stop & transcribe", systemImage: "stop.circle").frame(maxWidth: .infinity)
+                Label("Stop recording", systemImage: "stop.circle").frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .disabled(model.busy != nil)
         }
     }
 
+    /// The step after Stop: the transcript is held until tags are saved or skipped.
+    private func tagsSection(_ job: Job) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "tag.fill").foregroundStyle(.orange)
+                Text("Add tags").font(.headline)
+                Spacer()
+                Text(job.name).foregroundStyle(.secondary).lineLimit(1)
+            }
+            TextField("e.g. pricing, q4", text: $tags)
+                .textFieldStyle(.roundedBorder)
+                .focused($focus, equals: .tags)
+                .onSubmit { saveTags(job) }
+            HStack {
+                Button("Skip") { model.tag(job.id, "") { tags = "" } }
+                Spacer()
+                Button("Save tags") { saveTags(job) }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+            }
+            .disabled(model.busy != nil)
+            Group {
+                if job.state == "awaiting-tags" { Text("Transcript is ready and waiting for your tags.") }
+                else { Text("Transcribing in the background meanwhile.") }
+                if let left = model.tagsDeadline(job) { Text("Saved without tags in \(max(1, Int(left / 60 + 0.99))) min if you skip this.") }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear { focus = .tags }
+        .onReceive(NotificationCenter.default.publisher(for: NSPopover.didShowNotification)) { _ in focus = .tags }
+    }
+
+    private func saveTags(_ job: Job) {
+        guard model.busy == nil else { return }
+        model.tag(job.id, tags) { tags = "" }
+    }
+
     private func crashedSection(_ r: Recording) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("'\(r.name)' stopped unexpectedly", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Button("Transcribe what was captured") { model.stop(tags: "") {} }.disabled(model.busy != nil)
+            Button("Transcribe what was captured") { model.stop() }.disabled(model.busy != nil)
         }
     }
 
     @ViewBuilder private var jobsSection: some View {
-        if let jobs = model.status?.jobs, !jobs.isEmpty {
+        if let jobs = model.status?.jobs.filter({ $0.awaiting_tags != true }), !jobs.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(jobs) { job in
                     HStack(spacing: 6) {
-                        if job.state == "transcribing" || job.state == "stopping" {
+                        if ["transcribing", "stopping", "awaiting-tags"].contains(job.state) {
                             ProgressView().controlSize(.small)
                             Text(job.state == "stopping" ? "Stopping \(job.name)…" : "Transcribing \(job.name)…").lineLimit(1)
                         } else {
@@ -504,6 +571,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // objectWillChange fires before the change lands; read the new state on the next turn.
         observer = Model.shared.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.updateButton() }
+        }
+        // After a stop from a hotkey/URL (or with the panel closed), bring up the tags step.
+        Model.shared.onTagsNeeded = { [weak self] in
+            guard let self, !self.popover.isShown else { return }
+            self.togglePopover()
         }
         updateButton()
     }

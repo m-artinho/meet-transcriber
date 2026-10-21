@@ -47,7 +47,7 @@ Test it with the user:
 
 - `meet` is the CLI. It's Python 3.9-compatible and uses the standard library only (it runs on `/usr/bin/python3`).
 - `capture/main.swift` is the recorder: Core Audio process tap + input-device IOProc, 16 kHz mono WAVs.
-- `menubar/MeetBar.swift` is the menu bar app: an `NSStatusItem` + `NSPopover` hosting SwiftUI (not `MenuBarExtra`, which leaves ghost space when the content height changes). It also handles `meetbar://start?name=…` / `meetbar://stop?tags=…`. It only calls the CLI (`meet status --json` every 2–5 s, `start`, `stop --tags`, `retry`, `doctor`). Keep logic in `meet`, not in the app.
+- `menubar/MeetBar.swift` is the menu bar app: an `NSStatusItem` + `NSPopover` hosting SwiftUI (not `MenuBarExtra`, which leaves ghost space when the content height changes). It also handles `meetbar://start?name=…` / `meetbar://stop[?tags=…]`. Its Stop runs `meet stop --tags-later`, then shows a tags step that calls `meet tag <id> --tags=…`. It only calls the CLI (`meet status --json` every 2–5 s, `start`, `stop --tags`, `retry`, `doctor`). Keep logic in `meet`, not in the app.
 - Build with `./build.sh` (`--force` to rebuild). Every rebuild re-signs the helper, and macOS may ask for permissions again.
 - Logs: `~/Library/Logs/meet/meet.log` (includes each recording's recorder log). Data: `~/Library/Application Support/meet/`.
 - Don't run audio tests (e.g. `say`) while the user may be in a call: system audio is global.

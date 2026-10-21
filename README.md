@@ -59,7 +59,8 @@ The helper is ad-hoc signed, and macOS ties the grants to its signature. A rebui
 Click the mic icon in the menu bar:
 
 - **Idle:** type the meeting name and press Enter (or **Start recording**).
-- **Recording:** the menu bar shows a red dot and the elapsed time. The panel shows live mic and system levels with warnings (silent, dropping audio), an optional tags field and **Stop & transcribe**.
+- **Recording:** the menu bar shows a red dot and the elapsed time. The panel shows live mic and system levels with warnings (silent, dropping audio) and **Stop recording**.
+- **After stopping:** the panel asks for tags (the icon is an orange tag). Transcription starts right away in the background, but the transcript is only written once you **Save tags** or **Skip**. If you don't answer, it's written without tags 10 minutes after the stop. Stopping from a hotkey or `meetbar://stop` opens this step automatically.
 - **Transcribing:** an hourglass icon. Failed transcriptions get a **Retry** button.
 - **Always:** your last transcripts (click to open) and **Transcripts**, which opens the inbox folder.
 - **⋯ menu:** Check setup (`meet doctor`), Open at login, Open log, Quit. Quitting the app doesn't stop a recording.
@@ -72,7 +73,8 @@ The app is a front end for the `meet` command: it runs `meet start`, `meet stop`
 
 ```bash
 open "meetbar://start?name=Weekly%20sync"
-open "meetbar://stop?tags=team,q4"
+open "meetbar://stop"              # then asks for tags in the panel
+open "meetbar://stop?tags=team,q4" # or set them directly
 ```
 
 ### Terminal
@@ -86,6 +88,7 @@ meet stop                   # asks for tags, transcribes in the background, ✅ 
 The name you give at `meet start` is the transcript's title. Its slug (`pricing-sync`) goes into the filename and the `initiative` frontmatter field. Tags are only the ones you type at `meet stop`; press Enter to skip and the transcript has no tags.
 
 - `meet stop --tags "pricing, q4"` skips the prompt. Tags can be typed with or without `#`.
+- `meet stop --tags-later` doesn't ask; the transcript waits (up to 10 min) for `meet tag --tags "pricing, q4"` (or `--tags ""` for none). This is what the menu bar app uses.
 - `meet stop --wait` transcribes in the foreground.
 - `meet start <name> --keep-audio` or `meet stop --keep-audio` keeps the WAVs after success.
 - `meet retry [id]` re-runs a failed or interrupted transcription (latest by default).
@@ -160,11 +163,12 @@ meet start ─► bin/meet-capture <rec-dir>            (Swift, runs detached)
                 ├─ mic: IOProc on the input device        → mic.wav    (16 kHz mono)
                 ├─ system: CATapDescription tap-only agg. → system.wav (16 kHz mono)
                 └─ capture.json (start time, per-track offsets), levels.json (live levels)
-meet stop  ─► SIGTERM → WAVs finalized → tags prompt → `meet _process` (detached)
+meet stop  ─► SIGTERM → WAVs finalized → tags (prompt, --tags or later via `meet tag`) → `meet _process` (detached)
                 ├─ whisper-cli per track (-l auto, Silero VAD, initial prompt, -mc 64) → JSON segments
                 ├─ drop repetition loops (identical consecutive lines, lines seen 3+ times)
                 ├─ remove speaker bleed from the mic track
                 ├─ merge by timestamp, [hh:mm:ss] marker every ~30 s
+                ├─ with --tags-later: wait for `meet tag` (max 10 min after the stop)
                 └─ write markdown atomically → delete recording dir → ✅ notification
 ```
 
