@@ -26,7 +26,7 @@ sw_vers -productVersion; uname -m; xcode-select -p; command -v swiftc brew whisp
 ./install.sh --yes --inbox "<inbox>" --prompt "<prompt>" [--mic "<device name part>"]
 ```
 
-It's idempotent: re-running it skips anything already present, and with `--inbox`/`--mic`/`--prompt` it updates `~/.config/meet/config`. It ends with `meet doctor`; fix anything listed under "Problems". If `meet` isn't on PATH afterwards, the installer prints which directory to add.
+It also installs the menu bar app into `~/Applications/Meet.app` and opens it (`--no-app` to skip). It's idempotent: re-running it skips anything already present, and with `--inbox`/`--mic`/`--prompt` it updates `~/.config/meet/config`. It ends with `meet doctor`; fix anything listed under "Problems". If `meet` isn't on PATH afterwards, the installer prints which directory to add.
 
 ## 4. Permissions and first test (needs the user)
 
@@ -36,8 +36,9 @@ macOS permission prompts appear for `meet-capture` on the first recording, and t
 
 Test it with the user:
 1. Ask them to play some audio (a video) and speak.
-2. Run `meet start test`, then `meet status` after ~10 s. Both tracks should say `ok`.
-3. Run `meet stop --title "Setup test" --wait` and show them the resulting file in the inbox.
+2. Run `meet start "Setup test"`, then `meet status` after ~10 s. Both tracks should say `ok`. (Or have them use the menu bar app: mic icon → name → Start.)
+3. Run `meet stop --tags "" --wait` and show them the resulting file in the inbox.
+4. Suggest turning on "Open at login" in the menu bar app's ⋯ menu.
 
 - If `system: silent ⚠️`, the System Audio Recording permission is missing.
 - If notifications don't show, they need to enable "Script Editor" in System Settings → Notifications.
@@ -46,6 +47,7 @@ Test it with the user:
 
 - `meet` is the CLI. It's Python 3.9-compatible and uses the standard library only (it runs on `/usr/bin/python3`).
 - `capture/main.swift` is the recorder: Core Audio process tap + input-device IOProc, 16 kHz mono WAVs.
+- `menubar/MeetBar.swift` is the menu bar app: an `NSStatusItem` + `NSPopover` hosting SwiftUI (not `MenuBarExtra`, which leaves ghost space when the content height changes). It also handles `meetbar://start?name=…` / `meetbar://stop?tags=…`. It only calls the CLI (`meet status --json` every 2–5 s, `start`, `stop --tags`, `retry`, `doctor`). Keep logic in `meet`, not in the app.
 - Build with `./build.sh` (`--force` to rebuild). Every rebuild re-signs the helper, and macOS may ask for permissions again.
 - Logs: `~/Library/Logs/meet/meet.log` (includes each recording's recorder log). Data: `~/Library/Application Support/meet/`.
 - Don't run audio tests (e.g. `say`) while the user may be in a call: system audio is global.

@@ -1,21 +1,23 @@
 #!/bin/bash
-# One-time setup for meet: checks prerequisites, builds the capture helper,
-# installs whisper.cpp, downloads the models, writes ~/.config/meet/config and
-# links `meet` into your PATH. No sudo.
+# One-time setup for meet: checks prerequisites, builds the recorder and the
+# menu bar app, installs whisper.cpp, downloads the models, writes
+# ~/.config/meet/config, links `meet` into your PATH and installs Meet.app into
+# ~/Applications. No sudo.
 #
 # Interactive:      ./install.sh
-# Non-interactive:  ./install.sh --yes --inbox ~/Notes/Meetings [--mic "C922"] [--prompt "..."] [--link-dir DIR] [--no-link]
+# Non-interactive:  ./install.sh --yes --inbox ~/Notes/Meetings [--mic "C922"] [--prompt "..."] [--link-dir DIR] [--no-link] [--no-app]
 #   --yes        answer yes to every question (brew install, downloads, symlink)
 #   --inbox DIR  folder where transcripts are written (required if no config exists yet)
 #   --mic NAME   part of the input device name to record (default: system default input)
 #   --prompt TXT whisper initial prompt, in your meeting language(s)
+#   --no-app     don't install the menu bar app (Meet.app) into ~/Applications
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$PWD"
 MODELS="$HOME/Library/Application Support/meet/models"
 CONFIG="$HOME/.config/meet/config"
 
-YES=0; INBOX=""; MIC=""; PROMPT=""; LINK=1; LINK_DIR=""
+YES=0; INBOX=""; MIC=""; PROMPT=""; LINK=1; LINK_DIR=""; APP=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) YES=1 ;;
@@ -24,7 +26,8 @@ while [ $# -gt 0 ]; do
     --prompt) PROMPT="$2"; shift ;;
     --link-dir) LINK_DIR="$2"; shift ;;
     --no-link) LINK=0 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    --no-app) APP=0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -46,7 +49,7 @@ fi
 command -v swiftc >/dev/null || die "swiftc not found. Install the Xcode Command Line Tools: xcode-select --install"
 echo "macOS $ver, $(uname -m), $(swiftc --version 2>&1 | head -1)"
 
-echo "==> Building meet-capture"
+echo "==> Building meet-capture and Meet.app"
 ./build.sh
 
 echo "==> whisper.cpp"
@@ -116,8 +119,21 @@ if [ "$LINK" = 1 ]; then
   fi
 fi
 
+if [ "$APP" = 1 ]; then
+  echo "==> Menu bar app"
+  if ask "Install Meet.app (menu bar app) into ~/Applications and open it?"; then
+    mkdir -p "$HOME/Applications"
+    pkill -f "Meet.app/Contents/MacOS/Meet" 2>/dev/null || true
+    rm -rf "$HOME/Applications/Meet.app"
+    cp -R bin/Meet.app "$HOME/Applications/Meet.app"
+    xattr -dr com.apple.quarantine "$HOME/Applications/Meet.app" 2>/dev/null || true
+    open "$HOME/Applications/Meet.app"
+    echo "Meet is in your menu bar. Use its ⋯ menu to turn on 'Open at login'."
+  fi
+fi
+
 echo "==> Checking setup"
 "$ROOT/meet" doctor || true
 echo
-echo "Next: run 'meet start test', say a few words, then 'meet stop'."
+echo "Next: click the mic icon in the menu bar (or run 'meet start test'), say a few words, then stop."
 echo "macOS will ask for Microphone and System Audio Recording permission for 'meet-capture' on the first run."

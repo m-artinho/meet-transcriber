@@ -22,7 +22,8 @@ import Foundation
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
-func log(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
+let logClock: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f }()
+func log(_ s: String) { FileHandle.standardError.write(Data((logClock.string(from: Date()) + " " + s + "\n").utf8)) }
 func fail(_ s: String) -> Never { log("error: " + s); exit(1) }
 
 let sampleRate = 16000.0
@@ -583,12 +584,33 @@ let startedAt = isoNow()
 let sys = SystemCapture(name: "system", writer: sysWriter, control: control)
 let mic = MicCapture(writer: micWriter, control: control, match: ProcessInfo.processInfo.environment["MEET_MIC"])
 
+// Mic first: it's quick, and a stall in system audio must not lose your side too.
 var startError: String?
 control.sync {
-    do { try sys.start() } catch { startError = "system audio: \(error.localizedDescription)"; return }
-    do { try mic.start() } catch { sys.stop(); startError = "microphone: \(error.localizedDescription)" }
+    do { try mic.start() } catch { startError = "microphone: \(error.localizedDescription)" }
 }
 if let startError { fail(startError) }
+
+// System audio: macOS's audio service occasionally takes tens of seconds to start
+// a tap. Wait briefly so quick hard failures (no tap support...) still abort the
+// start; otherwise report "ready" now and let it finish in the background.
+let sysStarted = DispatchSemaphore(value: 0)
+var sysError: String?
+control.async {
+    let t0 = hostNow()
+    do { try sys.start() } catch { sysError = "system audio: \(error.localizedDescription)" }
+    if hostNow() - t0 > 3 { log("system: start took \(Int(hostNow() - t0)) s (macOS audio service was slow)") }
+    sysStarted.signal()
+}
+if sysStarted.wait(timeout: .now() + 3) == .success {
+    if let sysError { control.sync { mic.stop() }; fail(sysError) }
+} else {
+    log("system: still starting after 3 s; recording the mic meanwhile")
+    DispatchQueue.global().async {
+        sysStarted.wait()
+        if let sysError { log(sysError + " (the system track will be empty)") }
+    }
+}
 
 let captureURL = outDir.appendingPathComponent("capture.json")
 let levelsURL = outDir.appendingPathComponent("levels.json")

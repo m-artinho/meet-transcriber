@@ -1,9 +1,9 @@
 #!/usr/bin/python3
 """meet: local meeting recorder + transcriber.
 
-  meet start <initiative> [--keep-audio]
-  meet stop [--title T] [--tags a,b] [--keep-audio] [--wait]
-  meet status
+  meet start <name> [--keep-audio]       e.g. meet start "Pricing sync"
+  meet stop [--tags a,b] [--keep-audio] [--wait]
+  meet status [--json]
   meet retry [recording-id] [--wait]
   meet doctor            check the setup and list input devices
 
@@ -29,11 +29,20 @@ import unicodedata
 import wave
 from pathlib import Path
 
+import warnings
+with warnings.catch_warnings():  # deprecated since 3.11 (warns), removed in 3.13
+    warnings.simplefilter("ignore", DeprecationWarning)
+    try:
+        import audioop  # C speedup for loudness
+    except ImportError:
+        audioop = None
+
 ROOT = Path(os.path.realpath(__file__)).parent
 CAPTURE_BIN = ROOT / "bin" / "meet-capture"
 DATA = Path.home() / "Library" / "Application Support" / "meet"
 RECORDINGS = DATA / "recordings"
 CURRENT = DATA / "current.json"
+HISTORY = DATA / "history.json"  # last finished transcripts, for the menu bar app
 LOG = Path.home() / "Library" / "Logs" / "meet" / "meet.log"
 CONFIG_FILE = Path.home() / ".config" / "meet" / "config"
 
@@ -324,18 +333,30 @@ def drop_bleed(me, them, mic_rms):
 
 
 def make_rms(wav, offset):
-    """Return seg -> RMS of the mic audio under that segment (absolute times)."""
+    """Return seg -> RMS of the mic audio under that segment (absolute times).
+    Reads only each segment's slice, so long recordings don't load into memory."""
     try:
-        with wave.open(str(wav)) as w:
-            raw, rate = w.readframes(w.getnframes()), w.getframerate()
+        w = wave.open(str(wav))
     except (OSError, wave.Error):
         return lambda seg: 1.0
+    rate, total = w.getframerate(), w.getnframes()
+    cache = {}
 
     def rms(seg):
-        a = max(0, int((seg["start"] - offset) * rate)) * 2
-        b = max(a, int((seg["end"] - offset) * rate)) * 2
-        chunk = array.array("h", raw[a:b])
-        return math.sqrt(sum(x * x for x in chunk) / len(chunk)) / 32768 if chunk else 0.0
+        key = (seg["start"], seg["end"])
+        if key not in cache:
+            a = min(total, max(0, int((seg["start"] - offset) * rate)))
+            b = min(total, max(a, int((seg["end"] - offset) * rate)))
+            w.setpos(a)
+            raw = w.readframes(b - a)
+            if not raw:
+                cache[key] = 0.0
+            elif audioop:
+                cache[key] = audioop.rms(raw, 2) / 32768
+            else:
+                chunk = array.array("h", raw)
+                cache[key] = math.sqrt(sum(x * x for x in chunk) / len(chunk)) / 32768
+        return cache[key]
 
     return rms
 
@@ -390,7 +411,7 @@ def yaml_str(s):
 
 
 def render_markdown(info, started, ended, segs, langs):
-    title = info.get("title") or info["initiative"]
+    title = info.get("title") or info.get("name") or info["initiative"]
     tags = list(dict.fromkeys(info.get("tags") or []))  # only what the user typed at `meet stop`
     lang = langs[0] if len(langs) == 1 else ("[" + ", ".join(langs) + "]" if langs else "unknown")
     fm = [
@@ -411,11 +432,7 @@ def render_markdown(info, started, ended, segs, langs):
 
 
 def output_name(info, started):
-    name = f"{started:%Y-%m-%d_%H%M}_{info['initiative']}"
-    title_slug = slugify(info.get("title") or "")
-    if title_slug and title_slug != info["initiative"]:
-        name += "_" + title_slug
-    return name
+    return f"{started:%Y-%m-%d_%H%M}_{info['initiative']}"
 
 
 def write_atomic(inbox, name, text):
@@ -459,18 +476,25 @@ def process(rec_dir):
         md = render_markdown(info, started, ended, segs, detect_languages(segs, whisper_langs))
         path = write_atomic(Path(cfg["MEET_INBOX"]), output_name(info, started), md)
         log(f"{rec_dir.name}: wrote {path}")
+        add_history(info, path)
 
         if info.get("keep_audio") or truthy(cfg["MEET_KEEP_AUDIO"]):
             update_info(rec_dir, status="done", transcript=str(path), worker_pid=None)
         else:
             shutil.rmtree(rec_dir)
-        notify("meet", f"✅ Transcript ready: {info.get('title') or info['initiative']}")
+        notify("meet", f"✅ Transcript ready: {info.get('title') or info.get('name') or info['initiative']}")
         return path
     except Exception as e:
         log(f"{rec_dir.name}: FAILED\n{traceback.format_exc()}")
         update_info(rec_dir, status="failed", error=str(e), worker_pid=None)
         notify("meet", f"❌ Transcription failed — audio kept. Run: meet retry {rec_dir.name}")
         return None
+
+
+def add_history(info, path):
+    entry = {"name": info.get("title") or info.get("name") or info["initiative"], "path": str(path),
+             "finished_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    write_json(HISTORY, (read_json(HISTORY, []) + [entry])[-20:])
 
 
 def spawn_processor(rec_dir):
@@ -484,7 +508,7 @@ def spawn_processor(rec_dir):
 
 
 def run_processing(rec_dir, wait):
-    update_info(rec_dir, status="queued", worker_pid=None)
+    update_info(rec_dir, status="queued", worker_pid=os.getpid())
     if wait:
         print("Transcribing…")
         path = process(rec_dir)
@@ -513,14 +537,14 @@ def cmd_start(args):
     kill_strays()
     initiative = slugify(args.initiative)
     if not initiative:
-        fail("Initiative slug must contain letters or digits.")
+        fail("The meeting name must contain letters or digits.")
 
     now = dt.datetime.now().astimezone()
     rec_id = f"{now:%Y-%m-%d_%H%M%S}_{initiative}"
     rec_dir = RECORDINGS / rec_id
     rec_dir.mkdir(parents=True)
     write_json(rec_dir / "info.json", {
-        "id": rec_id, "initiative": initiative, "status": "recording",
+        "id": rec_id, "initiative": initiative, "name": args.initiative.strip(), "status": "recording",
         "started_at": now.isoformat(timespec="seconds"), "keep_audio": args.keep_audio,
     })
 
@@ -599,50 +623,75 @@ def cmd_stop(args):
     if not rec_dir.exists():
         fail(f"Recording folder is missing: {rec_dir}")
     started = parse_time(cur["started_at"])
-    update_info(rec_dir, status="stopped", stopped_at=stopped_at.isoformat(timespec="seconds"))
+    update_info(rec_dir, status="stopped", stopper_pid=os.getpid(), stopped_at=stopped_at.isoformat(timespec="seconds"))
     print(f"⏹  Stopped '{cur['initiative']}' after {hms((stopped_at - started).total_seconds())}.")
 
-    title, tags = args.title, args.tags
-    if sys.stdin.isatty():
+    tags = args.tags
+    if tags is None and sys.stdin.isatty():
         try:
-            if title is None:
-                title = ask("Title (Enter to skip): ")
-            if tags is None:
-                tags = ask("Tags, comma or space separated (Enter to skip): ")
+            tags = ask("Tags, comma or space separated (Enter to skip): ")
         except KeyboardInterrupt:
-            print("\nSkipped title/tags.")
+            print("\nSkipped tags.")
     tag_list = [t for t in (tagify(x) for x in re.split(r"[,\s]+", (tags or "").replace("#", ""))) if t]
     info = read_json(rec_dir / "info.json", {})
-    update_info(rec_dir, title=title or None, tags=tag_list,
+    update_info(rec_dir, tags=tag_list,
                 keep_audio=bool(info.get("keep_audio") or args.keep_audio))
     run_processing(rec_dir, args.wait)
 
 
-def cmd_status(args):
+def status_data():
+    """Everything `meet status` knows, as plain data (also used by the menu bar app)."""
+    cfg = load_config()
+    rec = None
     cur = read_json(CURRENT)
-    busy = False
     if cur:
-        busy = True
-        if pid_alive(cur.get("pid")):
-            elapsed = (dt.datetime.now().astimezone() - parse_time(cur["started_at"])).total_seconds()
-            print(f"🔴 Recording '{cur['initiative']}' for {hms(elapsed)}")
-            print("   " + level_summary(Path(cur["dir"]), elapsed))
-        else:
-            print(f"⚠️  Recording '{cur['initiative']}' ended unexpectedly. Run `meet stop` to transcribe what was captured.")
+        rec_dir = Path(cur["dir"])
+        info = read_json(rec_dir / "info.json", {})
+        elapsed = (dt.datetime.now().astimezone() - parse_time(cur["started_at"])).total_seconds()
+        rec = {"id": cur["id"], "name": info.get("name") or cur["initiative"], "initiative": cur["initiative"],
+               "started_at": cur["started_at"], "elapsed": elapsed, "alive": pid_alive(cur.get("pid")),
+               "dir": str(rec_dir), "levels": read_json(rec_dir / "levels.json")}
+    jobs = []
     for info_path in sorted(RECORDINGS.glob("*/info.json")):
         info = read_json(info_path, {})
         st = info.get("status")
         if st in ("transcribing", "queued"):
-            if pid_alive(info.get("worker_pid")):
-                busy = True
-                print(f"⏳ Transcribing {info['id']}")
-            else:
-                print(f"❌ {info['id']}: transcription was interrupted. Run `meet retry {info['id']}`")
+            st = "transcribing" if pid_alive(info.get("worker_pid")) else "interrupted"
         elif st == "stopped":
-            print(f"❌ {info['id']}: stopped but never transcribed. Run `meet retry {info['id']}`")
-        elif st == "failed":
-            print(f"❌ {info['id']}: failed ({info.get('error')}). Audio kept. Run `meet retry {info['id']}`")
-    if not busy:
+            st = "stopping" if pid_alive(info.get("stopper_pid")) else "stopped"  # stopping = tags prompt open
+        elif st != "failed":
+            continue
+        jobs.append({"id": info["id"], "name": info.get("name") or info.get("initiative", info["id"]),
+                     "state": st, "error": info.get("error")})
+    recent = list(reversed(read_json(HISTORY, [])))[:5]
+    return {"recording": rec, "jobs": jobs, "recent": recent, "inbox": cfg["MEET_INBOX"]}
+
+
+def cmd_status(args):
+    data = status_data()
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False))
+        return
+    rec = data["recording"]
+    if rec:
+        if rec["alive"]:
+            print(f"🔴 Recording '{rec['name']}' for {hms(rec['elapsed'])}")
+            print("   " + level_summary(Path(rec["dir"]), rec["elapsed"]))
+        else:
+            print(f"⚠️  Recording '{rec['name']}' ended unexpectedly. Run `meet stop` to transcribe what was captured.")
+    for job in data["jobs"]:
+        jid = job["id"]
+        if job["state"] == "transcribing":
+            print(f"⏳ Transcribing {jid}")
+        elif job["state"] == "stopping":
+            print(f"⏹  Stopping {jid} (waiting for tags)")
+        elif job["state"] == "interrupted":
+            print(f"❌ {jid}: transcription was interrupted. Run `meet retry {jid}`")
+        elif job["state"] == "stopped":
+            print(f"❌ {jid}: stopped but never transcribed. Run `meet retry {jid}`")
+        else:
+            print(f"❌ {jid}: failed ({job['error']}). Audio kept. Run `meet retry {jid}`")
+    if not rec and not any(j["state"] in ("transcribing", "stopping") for j in data["jobs"]):
         print("Idle — not recording.")
 
 
@@ -652,6 +701,8 @@ def level_summary(rec_dir, elapsed):
         return "levels: waiting…"
 
     def one(name, d):
+        if not d.get("seconds"):
+            return f"{name}: starting…"
         if d["peak_max"] == 0:
             return f"{name}: silent" + (" ⚠️ (permission?)" if elapsed > 15 else "")
         if d.get("filled_recent", 0) > 0.2:
@@ -699,15 +750,23 @@ def cmd_doctor(args):
     print("OK. Permissions can only be checked by recording: `meet start test`, talk, `meet status`, `meet stop`.")
 
 
+def busy_elsewhere(info):
+    """Another process is stopping or transcribing this recording right now."""
+    return pid_alive(info.get("worker_pid")) or (info.get("status") == "stopped" and pid_alive(info.get("stopper_pid")))
+
+
 def cmd_retry(args):
     if args.id:
         rec_dir = RECORDINGS / args.id
         if not rec_dir.exists():
             fail(f"No recording {args.id}")
+        info = read_json(rec_dir / "info.json", {})
+        if info.get("status") == "recording" or busy_elsewhere(info):
+            fail(f"{args.id} is still being recorded, stopped or transcribed.")
     else:
         cands = [p.parent for p in sorted(RECORDINGS.glob("*/info.json"))
                  if read_json(p, {}).get("status") in ("failed", "stopped", "transcribing", "queued")
-                 and not pid_alive(read_json(p, {}).get("worker_pid"))]
+                 and not busy_elsewhere(read_json(p, {}))]
         if not cands:
             fail("Nothing to retry.")
         rec_dir = cands[-1]
@@ -719,14 +778,14 @@ def main():
     p = argparse.ArgumentParser(prog="meet", description="Local meeting recorder + transcriber.")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start", help="start recording")
-    s.add_argument("initiative")
+    s.add_argument("initiative", metavar="name", help='meeting name, e.g. "Pricing sync" (slugified for the filename)')
     s.add_argument("--keep-audio", action="store_true", help="keep the WAV files after transcription")
     s = sub.add_parser("stop", help="stop recording and transcribe")
-    s.add_argument("--title")
     s.add_argument("--tags", help="comma or space separated")
     s.add_argument("--keep-audio", action="store_true")
     s.add_argument("--wait", action="store_true", help="transcribe in the foreground")
-    sub.add_parser("status", help="am I recording?")
+    s = sub.add_parser("status", help="am I recording?")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
     sub.add_parser("doctor", help="check the setup and list input devices")
     s = sub.add_parser("retry", help="re-run transcription for a failed recording")
     s.add_argument("id", nargs="?")
