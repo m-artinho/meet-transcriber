@@ -5,11 +5,13 @@
 	<key>CFBundleIdentifier</key>
 	<string>local.meet.bar</string>
 	<key>CFBundleName</key>
-	<string>Meet</string>
+	<string>Meet Transcriber</string>
 	<key>CFBundleDisplayName</key>
-	<string>Meet</string>
+	<string>Meet Transcriber</string>
 	<key>CFBundleExecutable</key>
-	<string>Meet</string>
+	<string>MeetTranscriber</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

@@ -46,6 +46,7 @@ CURRENT = DATA / "current.json"
 HISTORY = DATA / "history.json"  # last finished transcripts, for the menu bar app
 LOG = Path.home() / "Library" / "Logs" / "meet" / "meet.log"
 CONFIG_FILE = Path.home() / ".config" / "meet" / "config"
+APP_TITLE = "Meet Transcriber"  # notification title
 
 TIMESTAMP_EVERY = 30.0  # seconds between [hh:mm:ss] markers
 JOIN_GAP = 2.0          # join same-speaker segments closer than this
@@ -492,12 +493,12 @@ def process(rec_dir):
             update_info(rec_dir, status="done", transcript=str(path), worker_pid=None)
         else:
             shutil.rmtree(rec_dir)
-        notify("meet", f"✅ Transcript ready: {info.get('title') or info.get('name') or info['initiative']}")
+        notify(APP_TITLE, f"✅ Transcript ready: {info.get('title') or info.get('name') or info['initiative']}")
         return path
     except Exception as e:
         log(f"{rec_dir.name}: FAILED\n{traceback.format_exc()}")
         update_info(rec_dir, status="failed", error=str(e), worker_pid=None)
-        notify("meet", f"❌ Transcription failed — audio kept. Run: meet retry {rec_dir.name}")
+        notify(APP_TITLE, f"❌ Transcription failed — audio kept. Run: meet retry {rec_dir.name}")
         return None
 
 
@@ -594,7 +595,7 @@ def cmd_start(args):
     write_json(CURRENT, {"id": rec_id, "dir": str(rec_dir), "pid": proc.pid, "initiative": initiative,
                          "started_at": now.isoformat(timespec="seconds")})
     log(f"{rec_id}: recording started (pid {proc.pid})")
-    notify("meet", f"🔴 Recording: {initiative}")
+    notify(APP_TITLE, f"🔴 Recording: {initiative}")
     print(f"🔴 Recording '{initiative}'. Run `meet stop` when the meeting ends.")
 
 

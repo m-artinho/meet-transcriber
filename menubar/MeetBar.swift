@@ -1,4 +1,4 @@
-// Meet.app: menu bar front end for the `meet` CLI.
+// Meet Transcriber.app: menu bar front end for the `meet` CLI.
 //
 // URL scheme (for Raycast, Shortcuts, hotkeys):
 //   open "meetbar://start?name=Pricing%20sync"    open "meetbar://stop?tags=pricing,q4"
@@ -100,7 +100,7 @@ func notify(_ message: String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
     p.arguments = ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
-                   "-e", "end run", "meet", message]
+                   "-e", "end run", "Meet Transcriber", message]
     try? p.run()
 }
 
@@ -590,10 +590,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
         } else {
             Model.shared.refresh()
-            NSApp.activate() // so the text fields can take focus
+            takeFocus()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+            if let window = popover.contentViewController?.view.window {
+                window.makeKeyAndOrderFront(nil)
+                // Again on the next turn: the popover window only exists once it's on screen.
+                DispatchQueue.main.async { self.takeFocus(); window.makeKey() }
+            }
         }
+    }
+
+    /// The panel's text fields only get keystrokes while this app is active, and a
+    /// menu bar app never is on its own.
+    private func takeFocus() {
+        NSApp.activate()
     }
 
     private func updateButton() {

@@ -1,8 +1,8 @@
 #!/bin/bash
 # One-time setup for meet: checks prerequisites, builds the recorder and the
 # menu bar app, installs whisper.cpp, downloads the models, writes
-# ~/.config/meet/config, links `meet` into your PATH and installs Meet.app into
-# ~/Applications. No sudo.
+# ~/.config/meet/config, links `meet` into your PATH and installs the menu bar app
+# ("Meet Transcriber") into ~/Applications. No sudo.
 #
 # Interactive:      ./install.sh
 # Non-interactive:  ./install.sh --yes --inbox ~/Notes/Meetings [--mic "C922"] [--prompt "..."] [--link-dir DIR] [--no-link] [--no-app]
@@ -10,7 +10,7 @@
 #   --inbox DIR  folder where transcripts are written (required if no config exists yet)
 #   --mic NAME   part of the input device name to record (default: system default input)
 #   --prompt TXT whisper initial prompt, in your meeting language(s)
-#   --no-app     don't install the menu bar app (Meet.app) into ~/Applications
+#   --no-app     don't install the menu bar app (Meet Transcriber.app) into ~/Applications
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$PWD"
@@ -49,7 +49,7 @@ fi
 command -v swiftc >/dev/null || die "swiftc not found. Install the Xcode Command Line Tools: xcode-select --install"
 echo "macOS $ver, $(uname -m), $(swiftc --version 2>&1 | head -1)"
 
-echo "==> Building meet-capture and Meet.app"
+echo "==> Building meet-capture and Meet Transcriber.app"
 ./build.sh
 
 echo "==> whisper.cpp"
@@ -121,14 +121,16 @@ fi
 
 if [ "$APP" = 1 ]; then
   echo "==> Menu bar app"
-  if ask "Install Meet.app (menu bar app) into ~/Applications and open it?"; then
+  DEST="$HOME/Applications/Meet Transcriber.app"
+  if ask "Install the menu bar app into ~/Applications and open it?"; then
     mkdir -p "$HOME/Applications"
-    pkill -f "Meet.app/Contents/MacOS/Meet" 2>/dev/null || true
-    rm -rf "$HOME/Applications/Meet.app"
-    cp -R bin/Meet.app "$HOME/Applications/Meet.app"
-    xattr -dr com.apple.quarantine "$HOME/Applications/Meet.app" 2>/dev/null || true
-    open "$HOME/Applications/Meet.app"
-    echo "Meet is in your menu bar. Use its ⋯ menu to turn on 'Open at login'."
+    pkill -f "MacOS/MeetTranscriber" 2>/dev/null || true
+    pkill -f "Meet.app/Contents/MacOS/Meet" 2>/dev/null || true # old name
+    rm -rf "$DEST" "$HOME/Applications/Meet.app"
+    cp -R "bin/app.noindex/Meet Transcriber.app" "$DEST"
+    xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+    open "$DEST"
+    echo "Meet Transcriber is in your menu bar (and in Spotlight). Use its ⋯ menu to turn on 'Open at login'."
   fi
 fi
 

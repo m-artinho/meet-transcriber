@@ -25,12 +25,12 @@ git clone https://github.com/m-artinho/meet-transcriber.git && cd meet-transcrib
 
 The installer does the following, asking before each install or download (no sudo):
 1. Checks the prerequisites.
-2. Builds `bin/meet-capture` (the Swift recorder) and `bin/Meet.app` (the menu bar app).
+2. Builds `bin/meet-capture` (the Swift recorder) and `bin/app.noindex/Meet Transcriber.app` (the menu bar app; `.noindex` keeps this build copy out of Spotlight).
 3. Offers to `brew install whisper-cpp`.
 4. Downloads the models into `~/Library/Application Support/meet/models/`: large-v3-turbo (~1.6 GB) and Silero VAD (~1 MB), both checksum-verified.
 5. Asks where transcripts should go and writes `~/.config/meet/config`.
 6. Symlinks `meet` into your Homebrew `bin`, or `~/.local/bin` if that isn't writable.
-7. Copies `Meet.app` into `~/Applications` and opens it.
+7. Copies **Meet Transcriber** into `~/Applications` and opens it. It's in Spotlight too (⌘Space, "Meet Transcriber").
 8. Runs `meet doctor`.
 
 Non-interactive, e.g. when an agent sets it up for you:
@@ -172,7 +172,7 @@ meet stop  ─► SIGTERM → WAVs finalized → tags (prompt, --tags or later v
                 └─ write markdown atomically → delete recording dir → ✅ notification
 ```
 
-Files: `meet` is the CLI (Python 3 standard library only, runs on the system `/usr/bin/python3`). `capture/main.swift` is the recorder. `menubar/MeetBar.swift` is the menu bar app (an AppKit status item with a SwiftUI popover). `install.sh` and `build.sh` handle setup; `build.sh` rebuilds only what changed and refreshes `~/Applications/Meet.app`.
+Files: `meet` is the CLI (Python 3 standard library only, runs on the system `/usr/bin/python3`). `capture/main.swift` is the recorder. `menubar/MeetBar.swift` is the menu bar app (an AppKit status item with a SwiftUI popover). `install.sh` and `build.sh` handle setup; `build.sh` rebuilds only what changed and refreshes the copy in `~/Applications`. The app icon is `menubar/AppIcon.icns`, drawn by `menubar/make-icon.swift` (see its header to regenerate).
 
 Notes:
 - **Start-up order.** The mic starts first and `meet start` returns as soon as it's running. If macOS's audio service is slow to start the system-audio tap (rare, but it can take tens of seconds), the system track joins when it's ready; until then `meet status` and the app show it as `starting…`. The recorder log in `meet.log` has timestamps for each step.
@@ -186,7 +186,7 @@ Notes:
 
 ```bash
 rm "$(command -v meet)"                                   # the symlink
-rm -rf ~/Applications/Meet.app                            # the menu bar app (turn off "Open at login" first)
+rm -rf ~/Applications/Meet\ Transcriber.app               # the menu bar app (turn off "Open at login" first)
 rm -rf ~/.config/meet ~/Library/Logs/meet
 rm -rf ~/Library/Application\ Support/meet                # models (~1.6 GB) and any kept recordings
 brew uninstall whisper-cpp                                # if nothing else uses it

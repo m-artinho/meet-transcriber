@@ -26,7 +26,7 @@ sw_vers -productVersion; uname -m; xcode-select -p; command -v swiftc brew whisp
 ./install.sh --yes --inbox "<inbox>" --prompt "<prompt>" [--mic "<device name part>"]
 ```
 
-It also installs the menu bar app into `~/Applications/Meet.app` and opens it (`--no-app` to skip). It's idempotent: re-running it skips anything already present, and with `--inbox`/`--mic`/`--prompt` it updates `~/.config/meet/config`. It ends with `meet doctor`; fix anything listed under "Problems". If `meet` isn't on PATH afterwards, the installer prints which directory to add.
+It also installs the menu bar app into `~/Applications/Meet Transcriber.app` and opens it (`--no-app` to skip). It's idempotent: re-running it skips anything already present, and with `--inbox`/`--mic`/`--prompt` it updates `~/.config/meet/config`. It ends with `meet doctor`; fix anything listed under "Problems". If `meet` isn't on PATH afterwards, the installer prints which directory to add.
 
 ## 4. Permissions and first test (needs the user)
 
