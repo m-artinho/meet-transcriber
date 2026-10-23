@@ -2,6 +2,8 @@
 
 This repo is `meet`, a local meeting recorder/transcriber for macOS (see README.md). When the user asks you to set it up, follow these steps. Don't install anything or download models without the user's OK.
 
+**Already set up?** If `~/.config/meet/config` exists, skip these setup steps and don't re-check or re-ask anything here, unless the user asks to set up, reinstall or reconfigure meet. For code changes, go to "Notes for working on the code" below.
+
 ## 1. Check the machine (read-only)
 
 ```bash
@@ -15,7 +17,7 @@ sw_vers -productVersion; uname -m; xcode-select -p; command -v swiftc brew whisp
 
 ## 2. Ask the user
 
-1. **Inbox folder:** where the `.md` transcripts should go, e.g. an Obsidian vault folder. This one is required.
+1. **Inbox folder:** where the `.md` transcripts should go, e.g. an Obsidian vault folder. This one is required. Ask for the path as an open question: don't offer or pick a default folder (such as the one in `config.example`), since only the user knows where their notes live. Check that the path they give exists, and confirm before creating it if it doesn't.
 2. **Meeting language(s):** used to write `MEET_PROMPT`, a short punctuated sentence in those languages. For example, for English + Portuguese: `Olá, pessoal. Hi everyone, let's get started. Tudo bem?`. Names or jargon they use often can go in it too.
 3. **Mic:** which mic their meeting app uses. List the devices with `./build.sh && bin/meet-capture --list-inputs` (`*` = system default). Leave it empty to follow the system default. If they wear Bluetooth earbuds but the meeting app uses another mic, set `--mic` to that mic.
 4. **Permission to install:** `brew install whisper-cpp` (if missing), ~1.6 GB of model downloads, and a symlink for `meet` in Homebrew's `bin`.
