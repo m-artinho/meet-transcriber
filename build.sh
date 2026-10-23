@@ -37,8 +37,10 @@ EXE=MeetTranscriber
 ours() { [ "$(defaults read "$1/Contents/Info" CFBundleIdentifier 2>/dev/null)" = local.meet.bar ]; }
 if stale "$APP/Contents/MacOS/$EXE" menubar/MeetBar.swift menubar/Info.plist menubar/AppIcon.icns; then
   mkdir -p bin/app.noindex
-  NEW=bin/app.noindex/.new.app
-  rm -rf "$NEW"
+  # Staged outside the repo: if the repo is in iCloud Drive, its file provider adds
+  # Finder info to any .app bundle created there, and codesign rejects that.
+  STAGE=$(mktemp -d); trap 'rm -rf "$STAGE"' EXIT
+  NEW="$STAGE/new.app"
   mkdir -p "$NEW/Contents/MacOS" "$NEW/Contents/Resources"
   swiftc -O -swift-version 5 -target "$TARGET" -parse-as-library \
     -o "$NEW/Contents/MacOS/$EXE" menubar/MeetBar.swift
