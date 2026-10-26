@@ -52,8 +52,8 @@ TIMESTAMP_EVERY = 30.0  # seconds between [hh:mm:ss] markers
 JOIN_GAP = 2.0          # join same-speaker segments closer than this
 BLEED_RUN = 4           # word runs this long echoed from "Them" are removed from "Me"
 BLEED_SHARE = 0.6       # "Me" segments with this share of words echoed from "Them" are dropped
-BLEED_QUIET = 0.5
-TAG_WAIT = 10 * 60      # after a --tags-later stop, wait this long (from the stop) for `meet tag`       # "Me" overlapping "Them" at < this x your normal loudness is dropped
+BLEED_QUIET = 0.5       # "Me" overlapping "Them" at < this x your normal loudness is dropped
+TAG_WAIT = 10 * 60      # after a --tags-later stop, wait this long (from the stop) for `meet tag`
 
 
 # ---------------------------------------------------------------- utilities

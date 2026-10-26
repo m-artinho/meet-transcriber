@@ -182,6 +182,19 @@ Notes:
 - **Voice Isolation** and other macOS mic modes apply only inside apps that use Apple's voice processing (Teams, FaceTime…). `meet` records the raw mic on purpose, so other audio never gets ducked.
 - **Synced inbox.** If `MEET_INBOX` is inside iCloud Drive or another synced folder, transcripts sync with it. Audio never does.
 
+## Troubleshooting
+
+- **`system: silent ⚠️` while people are talking:** the System Audio Recording permission for `meet-capture` is missing (System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only). macOS records silence instead of failing.
+- **No "Me" lines:** check `meet doctor` for the input devices, and set `MEET_MIC` to the mic your meeting app actually uses. Bluetooth mics send silence while you're not talking, so occasional gaps are normal.
+- **macOS asks for permissions again:** the recorder was rebuilt (each build is re-signed). Allow once more.
+- **No notifications:** enable "Script Editor" in System Settings → Notifications.
+- **Something odd mid-recording:** `meet status` shows per-track health. `~/Library/Logs/meet/meet.log` has a timestamped recorder log for every recording (device switches, rebuilds, slow starts).
+- **Recording forgotten:** the menu bar app warns after 15 minutes without meeting audio and hourly after 3 hours. Trim long transcripts by hand; nothing is stopped automatically.
+
+## Development
+
+Architecture, state files, build/test practices and the pitfalls already solved are documented in [`CLAUDE.md`](CLAUDE.md). It's written for Claude Code but readable by humans too. Build with `./build.sh` (only changed targets; `--force` for both).
+
 ## Uninstall
 
 ```bash
