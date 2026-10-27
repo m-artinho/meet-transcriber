@@ -143,7 +143,7 @@ The file is written to a hidden `.tmp` file and then renamed, so a folder watche
 
 | Key | Default | |
 |---|---|---|
-| `MEET_INBOX` | `~/Documents/meeting-transcripts` | where the `.md` files go |
+| `MEET_INBOX` | required, no default | where the `.md` files go |
 | `MEET_MIC` | empty = default input | part of an input device name, e.g. `MacBook Pro Microphone`. `meet doctor` lists them |
 | `MEET_PROMPT` | `Hi everyone, let's get started.` | whisper initial prompt. Write it in your meeting language(s); add names/jargon |
 | `MEET_KEEP_AUDIO` | `0` | keep WAVs after success |
