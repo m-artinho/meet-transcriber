@@ -148,6 +148,7 @@ Runtime locations:
   - The punctuated `MEET_PROMPT` keeps casing and punctuation.
 - **Panel focus:** text fields need the app activated when the popover opens (`NSApp.activate()`, then `makeKey` again on the next runloop turn).
 - **Python version:** stdlib only and 3.9 syntax. `audioop` is optional (removed in 3.13), and its DeprecationWarning is silenced so it can't pollute stderr.
+- **UTC timestamps:** `parse_time` accepts a trailing `Z`. Python 3.9's `datetime.fromisoformat` rejects it, and the recorder writes `Z` when the Mac's timezone is UTC (`ISO8601DateFormatter`, `.withInternetDateTime`, `timeZone .current`). Leave `capture/main.swift` alone; rebuilding the recorder makes macOS ask for permissions again.
 
 ## Conventions
 
