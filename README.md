@@ -58,9 +58,9 @@ The helper is ad-hoc signed, and macOS ties the grants to its signature. A rebui
 
 Click the mic icon in the menu bar:
 
-- **Idle:** type the meeting name and press Enter (or **Start recording**).
+- **Idle:** type the meeting name and click **Start recording**.
 - **Recording:** the menu bar shows a red dot and the elapsed time. The panel shows live mic and system levels with warnings (silent, dropping audio) and **Stop recording**.
-- **After stopping:** the panel asks for tags (the icon is an orange tag). Transcription starts right away in the background, but the transcript is only written once you **Save tags** or **Skip**. If you don't answer, it's written without tags 10 minutes after the stop. Stopping from a hotkey or `meetbar://stop` opens this step automatically.
+- **After stopping:** the panel asks for tags (the icon is an orange tag). Transcription starts right away in the background, but the transcript is only written once you **Save tags** or **Skip**. If you don't answer, it's written without tags 10 minutes after the stop. Stopping from a hotkey or `meetbar://stop` opens this step automatically. As you type, tags you've used before are suggested (most used first): ↑/↓ to choose, Enter or Tab to pick, Esc to dismiss; a comma or space starts the next tag. Enter never saves or starts anything in the panel; only the buttons do.
 - **Transcribing:** an hourglass icon. Failed transcriptions get a **Retry** button.
 - **Always:** your last transcripts (click to open) and **Transcripts**, which opens the inbox folder.
 - **⋯ menu:** Check setup (`meet doctor`), Open at login, Open log, Quit. Quitting the app doesn't stop a recording.
@@ -154,6 +154,7 @@ The file is written to a hidden `.tmp` file and then renamed, so a folder watche
 
 - **Change where transcripts go:** edit `MEET_INBOX`, or re-run `./install.sh --inbox <dir>`.
 - **Change the model:** download another ggml model from <https://huggingface.co/ggerganov/whisper.cpp> into the models folder and point `MEET_MODEL` at it. For example, `ggml-large-v3.bin` for maximum accuracy, or `ggml-large-v3-turbo-q5_0.bin` for a smaller file.
+- **Fix words whisper keeps mishearing:** add `heard => meant` lines to `~/.config/meet/fixes`, e.g. `Rozzie API => RASI API`. Case-insensitive, whole words, applied to every new transcript. Putting the right spelling in `MEET_PROMPT` can also help whisper get it right in the first place.
 - **Other languages:** whisper auto-detects the language per track. Set `MEET_PROMPT` to a sentence in your language(s); the frontmatter `language` field uses whisper's detection, plus an extra EN/PT stopword check.
 
 ## How it works

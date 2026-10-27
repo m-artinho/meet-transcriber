@@ -44,8 +44,10 @@ DATA = Path.home() / "Library" / "Application Support" / "meet"
 RECORDINGS = DATA / "recordings"
 CURRENT = DATA / "current.json"
 HISTORY = DATA / "history.json"  # last finished transcripts, for the menu bar app
+TAGS = DATA / "tags.json"        # tags used so far {tag: {count, last}}, for tag suggestions
 LOG = Path.home() / "Library" / "Logs" / "meet" / "meet.log"
 CONFIG_FILE = Path.home() / ".config" / "meet" / "config"
+FIXES_FILE = CONFIG_FILE.with_name("fixes")  # "heard => meant" lines applied to every transcript
 APP_TITLE = "Meet Transcriber"  # notification title
 
 TIMESTAMP_EVERY = 30.0  # seconds between [hh:mm:ss] markers
@@ -164,6 +166,27 @@ def parse_tags(text):
     return list(dict.fromkeys(t for t in (tagify(x) for x in re.split(r"[,\s]+", (text or "").replace("#", ""))) if t))
 
 
+def load_fixes():
+    """[(regex, replacement)] from FIXES_FILE: `Rozzie API => RASI API`, case-insensitive,
+    whole words, any whitespace between words."""
+    fixes = []
+    if FIXES_FILE.exists():
+        for line in FIXES_FILE.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("#") or "=>" not in line:
+                continue
+            heard, meant = (x.strip() for x in line.split("=>", 1))
+            if heard:
+                pat = r"\s+".join(re.escape(w) for w in heard.split())
+                fixes.append((re.compile(r"(?<!\w)" + pat + r"(?!\w)", re.IGNORECASE), meant))
+    return fixes
+
+
+def apply_fixes(text, fixes):
+    for rx, meant in fixes:
+        text = rx.sub(lambda _: meant, text)
+    return text
+
+
 def hms(seconds):
     s = int(max(0, seconds))
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
@@ -273,9 +296,9 @@ def transcribe_track(cfg, rec_dir, track, offset):
     if data is None:
         raise RuntimeError(f"whisper-cli produced no JSON for {track}")
     log(f"transcribed {track} ({wav_seconds(wav):.0f}s audio) in {time.time() - t0:.1f}s")
-    segs = []
+    segs, fixes = [], load_fixes()
     for s in data.get("transcription", []):
-        text = s.get("text", "").strip()
+        text = apply_fixes(s.get("text", "").strip(), fixes)
         if not text or is_hallucination(text):
             continue
         segs.append({
@@ -535,6 +558,36 @@ def add_history(info, path):
     entry = {"name": info.get("title") or info.get("name") or info["initiative"], "path": str(path),
              "finished_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
     write_json(HISTORY, (read_json(HISTORY, []) + [entry])[-20:])
+    if info.get("tags"):
+        known = load_tags()
+        for t in info["tags"]:
+            known[t] = {"count": known.get(t, {}).get("count", 0) + 1, "last": entry["finished_at"]}
+        write_json(TAGS, known)
+
+
+def load_tags():
+    """Tags used so far. Seeded once from the inbox's frontmatter (files written before tags.json)."""
+    known = read_json(TAGS)
+    if known is not None:
+        return known
+    known, inbox = {}, load_config()["MEET_INBOX"]
+    for md in (sorted(Path(inbox).glob("*.md")) if inbox else []):
+        try:
+            with open(md, encoding="utf-8") as f:
+                head = f.read(2000)
+        except OSError:
+            continue
+        m = re.search(r"^tags: \[(.*)\]$", head, re.M)
+        for t in (parse_tags(m.group(1)) if m and head.startswith("---") else []):
+            known[t] = {"count": known.get(t, {}).get("count", 0) + 1, "last": ""}
+    write_json(TAGS, known)
+    return known
+
+
+def known_tags():
+    """Most used first, then most recent."""
+    known = load_tags()
+    return sorted(known, key=lambda t: (known[t].get("count", 0), known[t].get("last", "")), reverse=True)
 
 
 def wait_for_tags(rec_dir):
@@ -720,7 +773,7 @@ def status_data():
                      "state": st, "error": info.get("error"), "stopped_at": info.get("stopped_at"),
                      "awaiting_tags": bool(info.get("awaiting_tags")) and st in ("transcribing", "awaiting-tags")})
     recent = list(reversed(read_json(HISTORY, [])))[:5]
-    return {"recording": rec, "jobs": jobs, "recent": recent, "inbox": cfg["MEET_INBOX"]}
+    return {"recording": rec, "jobs": jobs, "recent": recent, "inbox": cfg["MEET_INBOX"], "known_tags": known_tags()}
 
 
 def cmd_status(args):

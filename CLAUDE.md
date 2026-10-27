@@ -55,6 +55,7 @@ Logic lives in `meet`. The app is a thin front end that only calls the CLI, so t
 | `config.example` | Documented config template. |
 
 Runtime locations:
+- Fixes: `~/.config/meet/fixes`, `heard => meant` lines applied to each segment's text right after whisper (`load_fixes`/`apply_fixes`).
 - Config: `~/.config/meet/config` (`KEY="value"`, `#` comments; env vars of the same name override). Keys: `MEET_INBOX` (required), `MEET_MIC`, `MEET_PROMPT`, `MEET_KEEP_AUDIO`, `MEET_MODEL`, `MEET_VAD_MODEL`, `MEET_THREADS`, `MEET_WHISPER`.
 - Data: `~/Library/Application Support/meet/` → `models/` (ggml-large-v3-turbo.bin, ggml-silero-v5.1.2.bin), `recordings/<id>/`, `current.json`, `history.json`.
 - Log: `~/Library/Logs/meet/meet.log`. Each recording's recorder log (timestamped) is copied in when it's processed.
@@ -68,6 +69,7 @@ Runtime locations:
 - `recordings/<id>/capture.json` (recorder): `started_at, ended_at, tracks.{mic,system}.{file, seconds, offset_sec}`. Offsets align the two tracks.
 - `recordings/<id>/levels.json` (recorder, every 2 s): per track `peak_recent, peak_max, filled_recent` (share of gap padding), `seconds`, `rebuilds`.
 - `history.json`: last 20 `{name, path, finished_at}` for the app's Recent list.
+- `tags.json`: `{tag: {count, last}}`, updated when a transcript is written; seeded once from the inbox's frontmatter. `status --json` returns `known_tags` (most used first) for the app's tag suggestions.
 
 ## CLI
 
@@ -102,7 +104,7 @@ Runtime locations:
 
 - `Model` (singleton) polls `meet status --json` every 2 s (busy) / 5 s (idle), never overlapping. It runs CLI calls with stdout/stderr kept apart, an augmented `PATH` (GUI apps get a minimal one), stdin `/dev/null`. Arguments are argparse-safe: `start -- <name>`, `--tags=<tags>`. The CLI path is `MeetCLIPath` from Info.plist, then the usual install locations.
 - **Menu bar icon:** mic (idle), red dot + timer (recording), orange "!" when quiet, orange tag (waiting for tags), hourglass (transcribing).
-- **Panel flow:** name → Start; while recording, levels plus Stop recording; then the **Add tags** step (Stop runs `stop --tags-later`; Save/Skip run `meet tag`); jobs with Retry; Recent; ⋯ menu (Check setup = `meet doctor`, Open at login via `SMAppService`, Open log, Quit).
+- **Panel flow:** name → Start (Enter never triggers a step; only buttons do); while recording, levels plus Stop recording; then the **Add tags** step (Stop runs `stop --tags-later`; Save/Skip run `meet tag`; `TagField`, an `NSTextField` wrapper, drives suggestions from `known_tags` with ↑/↓/Enter/Tab/Esc); jobs with Retry; Recent; ⋯ menu (Check setup = `meet doctor`, Open at login via `SMAppService`, Open log, Quit).
 - **Watchdog:** notification if system audio has been quiet (<0.003 peak) for 15 min (repeats every 30 min), and hourly after 3 h. It never auto-stops.
 - **URLs:** `meetbar://start?name=…`, `meetbar://stop` (opens the tags step), `meetbar://stop?tags=…`. Handy for testing the app's real code path from a shell.
 - **Popover, not `MenuBarExtra`:** the latter leaves ghost space when content height changes. The popover hosts with `sizingOptions = .preferredContentSize`, and the panel uses `.fixedSize(horizontal: false, vertical: true)`.

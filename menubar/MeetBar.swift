@@ -57,6 +57,7 @@ struct Status: Decodable {
     let jobs: [Job]
     let recent: [Recent]
     let inbox: String
+    let known_tags: [String]?
 }
 
 // MARK: - CLI bridge
@@ -350,6 +351,7 @@ struct Panel: View {
     @ObservedObject var model: Model
     @State private var name = ""
     @State private var tags = ""
+    @State private var picked = 0 // highlighted tag suggestion
     @FocusState private var focus: Field?
     enum Field { case name, tags }
 
@@ -386,7 +388,6 @@ struct Panel: View {
             TextField("Meeting name", text: $name)
                 .textFieldStyle(.roundedBorder)
                 .focused($focus, equals: .name)
-                .onSubmit(startIfValid)
             Button(action: startIfValid) {
                 Label("Start recording", systemImage: "record.circle").frame(maxWidth: .infinity)
             }
@@ -440,16 +441,27 @@ struct Panel: View {
                 Spacer()
                 Text(job.name).foregroundStyle(.secondary).lineLimit(1)
             }
-            TextField("e.g. pricing, q4", text: $tags)
-                .textFieldStyle(.roundedBorder)
-                .focused($focus, equals: .tags)
-                .onSubmit { saveTags(job) }
+            TagField(text: $tags, onKey: tagKey)
+                .onChange(of: tags) { picked = 0 }
+            if !tagSuggestions.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(tagSuggestions.enumerated()), id: \.element) { i, tag in
+                        Text("#" + tag)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(i == picked ? Color.accentColor.opacity(0.25) : .clear, in: RoundedRectangle(cornerRadius: 4))
+                            .contentShape(Rectangle())
+                            .onTapGesture { acceptTag(tag) }
+                    }
+                }
+                .padding(3)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+            }
             HStack {
                 Button("Skip") { model.tag(job.id, "") { tags = "" } }
                 Spacer()
                 Button("Save tags") { saveTags(job) }
                     .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
             }
             .disabled(model.busy != nil)
             Group {
@@ -459,8 +471,42 @@ struct Panel: View {
             }
             .font(.caption).foregroundStyle(.secondary)
         }
-        .onAppear { focus = .tags }
-        .onReceive(NotificationCenter.default.publisher(for: NSPopover.didShowNotification)) { _ in focus = .tags }
+    }
+
+    /// The tag being typed: after the last comma or space (both separate tags, as in `meet tag`).
+    private var tagPrefix: (head: Substring, token: String) {
+        let i = tags.lastIndex { $0 == "," || $0 == " " }.map { tags.index(after: $0) } ?? tags.startIndex
+        return (tags[..<i], tags[i...].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "#", with: "").lowercased())
+    }
+
+    /// Known tags matching what's being typed (prefix matches first), minus ones already entered.
+    private var tagSuggestions: [String] {
+        let (head, token) = tagPrefix
+        guard !token.isEmpty else { return [] }
+        let entered = Set(head.split { $0 == "," || $0 == " " }.map { $0.replacingOccurrences(of: "#", with: "").lowercased() })
+        let known = (model.status?.known_tags ?? []).filter { !entered.contains($0) && $0 != token }
+        return Array((known.filter { $0.hasPrefix(token) } + known.filter { !$0.hasPrefix(token) && $0.contains(token) }).prefix(6))
+    }
+
+    private func acceptTag(_ tag: String) {
+        tags = tagPrefix.head + tag + ", "
+    }
+
+    /// Keys in the tags field. Return/Tab pick the highlighted suggestion; Return never saves.
+    private func tagKey(_ key: TagField.Key) -> Bool {
+        let list = tagSuggestions
+        switch key {
+        case .up, .down:
+            guard !list.isEmpty else { return false }
+            picked = (picked + (key == .down ? 1 : list.count - 1)) % list.count
+        case .accept:
+            guard !list.isEmpty else { return false }
+            acceptTag(list[min(picked, list.count - 1)])
+        case .cancel:
+            guard !list.isEmpty else { return false } // no suggestions: Esc closes the panel
+            tags = String(tagPrefix.head)
+        }
+        return true
     }
 
     private func saveTags(_ job: Job) {
@@ -544,6 +590,68 @@ struct Panel: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
         }
+    }
+}
+
+/// The tags text field. An NSTextField so arrows/Return/Tab/Esc can drive the suggestions
+/// (SwiftUI's TextField doesn't hand those keys over reliably on macOS).
+struct TagField: NSViewRepresentable {
+    enum Key { case up, down, accept, cancel }
+    @Binding var text: String
+    /// Returns true when the key was handled.
+    var onKey: (Key) -> Bool
+
+    final class Field: NSTextField {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            focusSoon()
+        }
+        func focusSoon() { DispatchQueue.main.async { self.window?.makeFirstResponder(self) } }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: TagField
+        var observer: NSObjectProtocol?
+        init(_ parent: TagField) { self.parent = parent }
+        func controlTextDidChange(_ note: Notification) {
+            if let f = note.object as? NSTextField { parent.text = f.stringValue }
+        }
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+            switch sel {
+            case #selector(NSResponder.moveUp(_:)): return parent.onKey(.up)
+            case #selector(NSResponder.moveDown(_:)): return parent.onKey(.down)
+            case #selector(NSResponder.insertNewline(_:)): _ = parent.onKey(.accept); return true // never submits
+            case #selector(NSResponder.insertTab(_:)): return parent.onKey(.accept)
+            case #selector(NSResponder.cancelOperation(_:)): return parent.onKey(.cancel)
+            default: return false
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> Field {
+        let f = Field()
+        f.placeholderString = "e.g. pricing, q4"
+        f.bezelStyle = .roundedBezel
+        f.delegate = context.coordinator
+        f.lineBreakMode = .byTruncatingHead
+        f.cell?.isScrollable = true
+        // Reopening the panel: put the cursor back in the field.
+        context.coordinator.observer = NotificationCenter.default.addObserver(
+            forName: NSPopover.didShowNotification, object: nil, queue: .main) { [weak f] _ in f?.focusSoon() }
+        return f
+    }
+
+    func updateNSView(_ f: Field, context: Context) {
+        context.coordinator.parent = self
+        guard f.stringValue != text else { return }
+        f.stringValue = text
+        f.currentEditor()?.selectedRange = NSRange(location: (text as NSString).length, length: 0) // cursor at the end
+    }
+
+    static func dismantleNSView(_ f: Field, coordinator: Coordinator) {
+        if let o = coordinator.observer { NotificationCenter.default.removeObserver(o) }
     }
 }
 
