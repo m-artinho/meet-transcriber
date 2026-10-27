@@ -166,6 +166,7 @@ meet start ─► bin/meet-capture <rec-dir>            (Swift, runs detached)
 meet stop  ─► SIGTERM → WAVs finalized → tags (prompt, --tags or later via `meet tag`) → `meet _process` (detached)
                 ├─ whisper-cli per track (-l auto, Silero VAD, initial prompt, -mc 64) → JSON segments
                 ├─ drop repetition loops (identical consecutive lines, lines seen 3+ times)
+                ├─ drop a line only when it is outro junk ("thanks for watching", "inscreva-se", …) or a noise marker like [Music]
                 ├─ remove speaker bleed from the mic track
                 ├─ merge by timestamp, [hh:mm:ss] marker every ~30 s
                 ├─ with --tags-later: wait for `meet tag` (max 10 min after the stop)

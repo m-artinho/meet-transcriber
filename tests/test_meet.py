@@ -114,6 +114,63 @@ class TimeTests(unittest.TestCase):
         self.assertEqual(offset, dt.datetime(2026, 10, 16, 11, 30, tzinfo=dt.timezone(dt.timedelta(hours=-3))))
 
 
+class HallucinationTests(unittest.TestCase):
+    def assert_junk(self, lines):
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertTrue(meet.is_hallucination(line))
+
+    def assert_kept(self, lines):
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertFalse(meet.is_hallucination(line))
+
+    def test_real_speech_that_mentions_an_outro_word_is_kept(self):
+        self.assert_kept([
+            "If customers subscribe annually we give 20% off.",
+            "We should subscribe the team to the newsletter tomorrow.",
+            "If they subscribe, we win.",
+            "Thanks for watching the demo, the numbers are in.",
+            "Thank you for watching the numbers with me.",
+            "Obrigado por assistir a apresentação de hoje.",
+            "As legendas pela comunidade estão erradas neste trecho.",
+            "I found the file on amara.org yesterday.",
+            "See you next time, subscribe",
+            "subscribed",
+            "Please unsubscribe from that list.",
+            "hello [Music] there",
+            "[Music] extra",
+        ])
+
+    def test_outro_junk_lines_are_dropped(self):
+        self.assert_junk([
+            "Thanks for watching",
+            "Thanks for watching!",
+            "thanks for watching.",
+            "Thank you for watching",
+            "Obrigado por assistir",
+            "Obrigada por assistir.",
+            "Please subscribe",
+            "Subscribe",
+            "Subscribe!",
+            "Subscribe to my channel",
+            "Don't forget to subscribe",
+            "Like and subscribe",
+            "Inscreva-se",
+            "Inscreva-se no canal",
+            "Por favor, inscreva-se",
+            "Legendas pela comunidade",
+            "Legendas pela comunidade Amara.org",
+            "Subtitles by the Amara.org community",
+            "www.amara.org",
+            "amara.org",
+            "Thanks for watching! Please subscribe",
+        ])
+
+    def test_noise_markers_are_dropped(self):
+        self.assert_junk(["[Music]", "[BLANK_AUDIO]", "(música)", "[Applause]", " (music) "])
+
+
 class CollapseRepeatsTests(unittest.TestCase):
     def texts(self, items):
         return [s["text"] for s in meet.collapse_repeats([seg(t, i, i + 0.5) for i, t in enumerate(items)])]
