@@ -6,11 +6,13 @@
 #
 # Interactive:      ./install.sh
 # Non-interactive:  ./install.sh --yes --inbox ~/Notes/Meetings [--mic "C922"] [--prompt "..."] [--link-dir DIR] [--no-link] [--no-app]
-#   --yes        answer yes to every question (brew install, downloads, symlink)
-#   --inbox DIR  folder where transcripts are written (required if no config exists yet)
-#   --mic NAME   part of the input device name to record (default: system default input)
-#   --prompt TXT whisper initial prompt, in your meeting language(s)
-#   --no-app     don't install the menu bar app (Meet Transcriber.app) into ~/Applications
+#   --yes           answer yes to every question (brew install, downloads, symlink)
+#   --inbox DIR     folder where transcripts are written (required if no config exists yet)
+#   --mic NAME      part of the input device name to record (default: system default input)
+#   --prompt TXT    whisper initial prompt, in your meeting language(s)
+#   --link-dir DIR  directory to symlink `meet` into (default: Homebrew bin if writable, else ~/.local/bin)
+#   --no-link       don't create the `meet` symlink
+#   --no-app        don't install the menu bar app (Meet Transcriber.app) into ~/Applications
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$PWD"
