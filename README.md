@@ -195,6 +195,8 @@ Notes:
 
 Architecture, state files, build/test practices and the pitfalls already solved are documented in [`CLAUDE.md`](CLAUDE.md). It's written for Claude Code but readable by humans too. Build with `./build.sh` (only changed targets; `--force` for both).
 
+Run the unit tests with `python3 -m unittest discover tests`.
+
 ## Uninstall
 
 ```bash
