@@ -212,11 +212,34 @@ def wav_seconds(path):
 
 # ---------------------------------------------------------------- transcription
 
-HALLUCINATIONS = re.compile(
-    r"amara\.org|thanks for watching|subscribe|inscreva-se|legendas pela comunidade|"
-    r"^\W*[\[(][^\])]*[\])]\W*$",  # "[Music]", "(música)", "[BLANK_AUDIO]"
+# Bracketed non-speech on its own line: "[Music]", "(música)", "[BLANK_AUDIO]".
+_NOISE_MARKER = re.compile(r"^\W*[\[(][^\])]*[\])]\W*$")
+
+# Whisper/YouTube outros, EN and PT. Word-bounded so "subscribe" inside a real
+# sentence is not a match; the line is junk only when nothing meaningful is left.
+_OUTRO_PHRASES = re.compile(
+    r"\b(?:amara\.org|thank you for watching|thanks for watching|"
+    r"obrigad[oa] por assistir|subscribe|inscreva-se|legendas pela comunidade)\b",
     re.IGNORECASE,
 )
+_OUTRO_FILLER = {
+    "please", "por", "favor", "the", "to", "my", "our", "and",
+    "no", "canal", "da", "www", "community", "subtitles", "by",
+    "like", "dont", "forget", "channel",
+}
+
+
+def is_hallucination(text):
+    """True when a whisper line is a noise marker or essentially just outro junk."""
+    if not text:
+        return False
+    if _NOISE_MARKER.match(text):
+        return True
+    if not _OUTRO_PHRASES.search(text):
+        return False
+    normalized = text.lower().replace("'", "").replace("\u2019", "")
+    leftover = re.findall(r"\w+", _OUTRO_PHRASES.sub(" ", normalized))
+    return all(w in _OUTRO_FILLER for w in leftover)
 
 
 def transcribe_track(cfg, rec_dir, track, offset):
@@ -247,7 +270,7 @@ def transcribe_track(cfg, rec_dir, track, offset):
     segs = []
     for s in data.get("transcription", []):
         text = s.get("text", "").strip()
-        if not text or HALLUCINATIONS.search(text):
+        if not text or is_hallucination(text):
             continue
         segs.append({
             "start": offset + s["offsets"]["from"] / 1000,

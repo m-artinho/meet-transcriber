@@ -93,7 +93,7 @@ Runtime locations:
 ## Transcription (`meet`)
 
 - `whisper-cli -l auto --vad -vm <silero> -vsd 500 -vp 200 -sns -mc 64 --prompt "$MEET_PROMPT" -ojf`, per track.
-- `collapse_repeats` and the `HALLUCINATIONS` regex drop loops and junk lines.
+- `collapse_repeats` drops repetition loops. `is_hallucination` drops bracketed noise markers (`[Music]`, `[BLANK_AUDIO]`) and lines that are essentially just whisper/YouTube outro junk (EN/PT), not real speech that happens to contain a word like "subscribe".
 - `drop_bleed`: removes ≥4-word runs echoed from overlapping "Them", drops what's still ≥60% echo, and drops "Me" segments overlapping "Them" that are <0.5× your normal loudness. `make_rms` reads only each segment's slice and uses `audioop` when present.
 - `detect_languages`: EN/PT stopword heuristic plus whisper's per-track detection.
 - `build_body`: `**[hh:mm:ss]**` marker every ~30 s; same-speaker segments joined if <2 s apart.
