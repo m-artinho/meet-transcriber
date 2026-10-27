@@ -118,6 +118,7 @@ Runtime locations:
 
 ## Testing safely
 
+- **Unit tests:** `python3 -m unittest discover tests` (stdlib unittest, Python 3.9).
 - **Check `meet status` first.** The user may be recording or in a call. Never play audio (`say`, `afplay`) while they might be in a call: system audio is global and they'll hear it.
 - **CLI tests:** set `MEET_INBOX=<scratch dir>` so transcripts don't land in the user's inbox. Use short silent recordings: `meet start "x"; sleep 4; meet stop --tags "" --wait </dev/null`.
 - **App tests** (e.g. `open "meetbar://start?name=x"`) use the user's real config, so the transcript lands in their inbox. Afterwards, move it to `~/.Trash` and remove its entry from `history.json`. Also clean `history.json` after CLI tests (entries point at scratch paths).
