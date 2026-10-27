@@ -170,7 +170,13 @@ def hms(seconds):
 
 
 def parse_time(s):
-    return dt.datetime.fromisoformat(s) if s else None
+    """ISO timestamp. Python 3.9 fromisoformat rejects a trailing Z, which the
+    recorder writes at UTC+0 (ISO8601DateFormatter, .withInternetDateTime)."""
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return dt.datetime.fromisoformat(s)
 
 
 def fail(msg, code=1):

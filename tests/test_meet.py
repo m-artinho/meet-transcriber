@@ -113,6 +113,11 @@ class TimeTests(unittest.TestCase):
         offset = meet.parse_time("2026-10-16T11:30:00-03:00")
         self.assertEqual(offset, dt.datetime(2026, 10, 16, 11, 30, tzinfo=dt.timezone(dt.timedelta(hours=-3))))
 
+    def test_parse_time_trailing_z(self):
+        # Recorder timestamps at UTC+0 end in Z. Python 3.9 fromisoformat rejects that.
+        got = meet.parse_time("2026-10-16T14:30:00Z")
+        self.assertEqual(got, dt.datetime(2026, 10, 16, 14, 30, tzinfo=dt.timezone.utc))
+
 
 class HallucinationTests(unittest.TestCase):
     def assert_junk(self, lines):
