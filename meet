@@ -102,9 +102,80 @@ def truthy(v):
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
+def chmod_nosymlink(path, mode):
+    """chmod a real file or directory. A symlink is left alone (don't change its target)."""
+    path = Path(path)
+    if path.is_symlink() or not path.exists():
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def ensure_private_dir(path):
+    """Create `path` (and any missing parents) as mode 0700. Never chmod an existing ancestor
+    outside this path, and never follow a symlink to chmod something else."""
+    path = Path(path)
+    missing = []
+    cur = path
+    while not cur.exists():
+        if cur.is_symlink():  # broken symlink: don't mkdir over it
+            break
+        missing.append(cur)
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700, exist_ok=True)
+        chmod_nosymlink(directory, 0o700)
+    chmod_nosymlink(path, 0o700)
+    return path
+
+
+def harden_private_dirs():
+    """Owner-only dirs for recordings, logs and config. Other accounts on this Mac
+    must not be able to read meeting audio. Files inside a 0700 directory are
+    unreachable even if an older one was created mode 0644."""
+    for path in (DATA, RECORDINGS, LOG.parent, CONFIG_FILE.parent):
+        chmod_nosymlink(path, 0o700)
+    if not RECORDINGS.is_symlink() and RECORDINGS.is_dir():
+        for child in RECORDINGS.iterdir():
+            if not child.is_symlink() and child.is_dir():
+                chmod_nosymlink(child, 0o700)
+    for path in (CONFIG_FILE, FIXES_FILE, LOG, CURRENT, HISTORY, TAGS):
+        if not path.is_symlink() and path.is_file():
+            chmod_nosymlink(path, 0o600)
+
+
+def open_private(path, flags, text_mode="w", encoding=None):
+    """Open a new or existing file as mode 0600, without following a symlink."""
+    path = Path(path)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    last_error = None
+    fd = None
+    for _ in range(2):
+        try:
+            fd = os.open(path, flags, 0o600)
+            break
+        except OSError as exc:
+            last_error = exc
+            if path.is_symlink():
+                path.unlink()
+                continue
+            raise
+    else:
+        raise last_error
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    return os.fdopen(fd, text_mode, encoding=encoding)
+
+
 def log(msg):
-    LOG.parent.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a") as f:
+    ensure_private_dir(LOG.parent)
+    with open_private(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, text_mode="a") as f:
         f.write(f"{dt.datetime.now().isoformat(timespec='seconds')} {msg}\n")
 
 
@@ -126,7 +197,9 @@ def read_json(path, default=None):
 def write_json(path, obj):
     path = Path(path)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False))
+    text = json.dumps(obj, indent=2, ensure_ascii=False)
+    with open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, encoding="utf-8") as f:
+        f.write(text)
     os.replace(tmp, path)
 
 
@@ -495,18 +568,78 @@ def output_name(info, started):
 
 
 def write_atomic(inbox, name, text):
-    inbox.mkdir(parents=True, exist_ok=True)
-    path, n = inbox / f"{name}.md", 2
-    while path.exists():
-        path, n = inbox / f"{name}-{n}.md", n + 1
-    tmp = inbox / f".{path.name}.tmp"  # dotfile: ignored by Obsidian and most watchers
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-    return path
+    """Write `text` to `<inbox>/<name>.md`, using `<name>-2.md`, `<name>-3.md`, … if taken.
+
+    The temp file is in the same directory and published with link(2), so watchers
+    only see the finished file. Mode is 0600. An existing name, including a symlink,
+    is never overwritten or followed.
+    """
+    inbox = Path(inbox)
+    if inbox.exists():
+        if not inbox.is_dir():
+            raise NotADirectoryError(str(inbox))
+    else:
+        ensure_private_dir(inbox)
+    n = 1
+    while True:
+        filename = f"{name}.md" if n == 1 else f"{name}-{n}.md"
+        path = inbox / filename
+        tmp = inbox / f".{filename}.{os.getpid()}.tmp"  # dotfile: ignored by Obsidian and most watchers
+        with open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, encoding="utf-8") as handle:
+            handle.write(text)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            tmp.unlink(missing_ok=True)
+            n += 1
+            continue
+        tmp.unlink(missing_ok=True)
+        return path
+
+
+def resolve_recording(rec_dir):
+    """Absolute path strictly inside RECORDINGS, or None if it escapes (including via symlink)."""
+    root = RECORDINGS.resolve()
+    try:
+        rec_dir = Path(rec_dir).resolve()
+    except OSError:
+        return None
+    if rec_dir == root or not rec_dir.is_relative_to(root):
+        return None
+    return rec_dir
+
+
+def recording_from_id(rec_id):
+    """recordings/<id> for a single path component, else None. Rejects `..`, slashes and symlink escapes."""
+    if not isinstance(rec_id, str) or not rec_id or rec_id in (".", ".."):
+        return None
+    if rec_id != Path(rec_id).name:
+        return None
+    return resolve_recording(RECORDINGS / rec_id)
+
+
+def recording_dirs():
+    """Recording directories inside RECORDINGS. Symlinks that point outside are skipped."""
+    if not RECORDINGS.exists() or RECORDINGS.is_symlink():
+        return []
+    found = []
+    for info_path in sorted(RECORDINGS.glob("*/info.json")):
+        rec_dir = resolve_recording(info_path.parent)
+        if rec_dir is not None:
+            found.append(rec_dir)
+    return found
 
 
 def process(rec_dir):
-    """Transcribe a stopped recording, write markdown, clean up. Never raises."""
+    """Transcribe a stopped recording, write markdown, clean up. Never raises.
+
+    Refuses paths outside RECORDINGS so a bad id or current.json cannot rmtree
+    some other directory.
+    """
+    rec_dir = resolve_recording(rec_dir)
+    if rec_dir is None:
+        log(f"refusing to process a path outside {RECORDINGS}")
+        return None
     cfg = load_config()
     info = update_info(rec_dir, status="transcribing", worker_pid=os.getpid(), error=None)
     cap_log = rec_dir / "capture.log"
@@ -649,8 +782,7 @@ def cmd_start(args):
 
     now = dt.datetime.now().astimezone()
     rec_id = f"{now:%Y-%m-%d_%H%M%S}_{initiative}"
-    rec_dir = RECORDINGS / rec_id
-    rec_dir.mkdir(parents=True)
+    rec_dir = ensure_private_dir(RECORDINGS / rec_id)
     write_json(rec_dir / "info.json", {
         "id": rec_id, "initiative": initiative, "name": args.initiative.strip(), "status": "recording",
         "started_at": now.isoformat(timespec="seconds"), "keep_audio": args.keep_audio,
@@ -696,13 +828,56 @@ def kill_group(pid):
         pass
 
 
+def is_recorder_command(command, binary):
+    """True when `command` is the recorder itself.
+
+    `pgrep -f` is a regex and matches any process that merely mentions the binary
+    path (an editor, codesign, the pgrep that searches for it). The command must
+    be the binary, or the binary followed by its arguments.
+    """
+    binary = str(binary)
+    command = command.strip()
+    return command == binary or command.startswith(binary + " ")
+
+
+def command_of(pid):
+    """Full command line of `pid`, or None if it can't be read."""
+    try:
+        p = subprocess.run(["ps", "-p", str(int(pid)), "-ww", "-o", "command="],
+                           capture_output=True, text=True)
+    except (OSError, ValueError):
+        return None
+    if p.returncode != 0:
+        return None
+    return p.stdout.strip()
+
+
+def is_our_recorder(pid):
+    """False when `pid` is positively some other program. Unknown (ps failed) stays True
+    so a real recording can still be stopped."""
+    command = command_of(pid)
+    if command is None:
+        return True
+    return is_recorder_command(command, CAPTURE_BIN)
+
+
 def kill_strays():
     """Kill recorder processes left behind by an earlier crash."""
-    p = subprocess.run(["pgrep", "-f", str(CAPTURE_BIN)], capture_output=True, text=True)
-    for pid in p.stdout.split():
+    binary = str(CAPTURE_BIN)
+    try:
+        p = subprocess.run(["ps", "-ax", "-ww", "-o", "pid=,command="], capture_output=True, text=True)
+    except OSError:
+        return
+    for line in p.stdout.splitlines():
+        pid, sep, command = line.strip().partition(" ")
+        if not sep or not is_recorder_command(command, binary):
+            continue
         try:
-            os.kill(int(pid), signal.SIGKILL)
-            log(f"killed stray recorder pid {pid}")
+            pid_i = int(pid)
+            if pid_i == os.getpid():
+                continue
+            os.kill(pid_i, signal.SIGKILL)
+            log(f"killed stray recorder pid {pid_i}")
         except (ProcessLookupError, PermissionError, ValueError):
             pass
 
@@ -711,9 +886,11 @@ def cmd_stop(args):
     cur = read_json(CURRENT)
     if not cur:
         fail("Not recording.")
-    rec_dir = Path(cur["dir"])
     pid = cur.get("pid")
     stopped_at = dt.datetime.now().astimezone()
+    if pid_alive(pid) and not is_our_recorder(pid):
+        log(f"{cur.get('id')}: not stopping pid {pid}; it is not meet-capture")
+        pid = None
     if pid_alive(pid):
         print("Stopping…", flush=True)
         os.kill(pid, signal.SIGTERM)
@@ -728,8 +905,9 @@ def cmd_stop(args):
     CURRENT.unlink()
     log(f"{cur['id']}: recording stopped")
 
-    if not rec_dir.exists():
-        fail(f"Recording folder is missing: {rec_dir}")
+    rec_dir = resolve_recording(cur.get("dir", ""))
+    if rec_dir is None or not rec_dir.exists():
+        fail(f"Recording folder is missing or outside {RECORDINGS}.")
     started = parse_time(cur["started_at"])
     update_info(rec_dir, status="stopped", stopper_pid=os.getpid(), stopped_at=stopped_at.isoformat(timespec="seconds"))
     print(f"⏹  Stopped '{cur['initiative']}' after {hms((stopped_at - started).total_seconds())}.")
@@ -752,15 +930,16 @@ def status_data():
     rec = None
     cur = read_json(CURRENT)
     if cur:
-        rec_dir = Path(cur["dir"])
-        info = read_json(rec_dir / "info.json", {})
+        # Don't open a path from current.json unless it is inside recordings/.
+        rec_dir = resolve_recording(cur.get("dir", ""))
+        info = read_json(rec_dir / "info.json", {}) if rec_dir else {}
         elapsed = (dt.datetime.now().astimezone() - parse_time(cur["started_at"])).total_seconds()
         rec = {"id": cur["id"], "name": info.get("name") or cur["initiative"], "initiative": cur["initiative"],
                "started_at": cur["started_at"], "elapsed": elapsed, "alive": pid_alive(cur.get("pid")),
-               "dir": str(rec_dir), "levels": read_json(rec_dir / "levels.json")}
+               "dir": str(rec_dir or ""), "levels": read_json(rec_dir / "levels.json") if rec_dir else None}
     jobs = []
-    for info_path in sorted(RECORDINGS.glob("*/info.json")):
-        info = read_json(info_path, {})
+    for rec_dir in recording_dirs():
+        info = read_json(rec_dir / "info.json", {})
         st = info.get("status")
         if st in ("transcribing", "queued", "awaiting-tags"):
             st = st if st != "queued" else "transcribing"
@@ -863,9 +1042,11 @@ def cmd_doctor(args):
 
 def cmd_tag(args):
     if args.id:
-        rec_dir = RECORDINGS / args.id
+        rec_dir = recording_from_id(args.id)
+        if rec_dir is None:
+            fail(f"Invalid recording id: {args.id}")
     else:
-        waiting = [p.parent for p in sorted(RECORDINGS.glob("*/info.json")) if read_json(p, {}).get("awaiting_tags")]
+        waiting = [d for d in recording_dirs() if read_json(d / "info.json", {}).get("awaiting_tags")]
         if not waiting:
             fail("No recording is waiting for tags.")
         rec_dir = waiting[-1]
@@ -884,16 +1065,18 @@ def busy_elsewhere(info):
 
 def cmd_retry(args):
     if args.id:
-        rec_dir = RECORDINGS / args.id
+        rec_dir = recording_from_id(args.id)
+        if rec_dir is None:
+            fail(f"Invalid recording id: {args.id}")
         if not rec_dir.exists():
             fail(f"No recording {args.id}")
         info = read_json(rec_dir / "info.json", {})
         if info.get("status") == "recording" or busy_elsewhere(info):
             fail(f"{args.id} is still being recorded, stopped or transcribed.")
     else:
-        cands = [p.parent for p in sorted(RECORDINGS.glob("*/info.json"))
-                 if read_json(p, {}).get("status") in ("failed", "stopped", "transcribing", "queued", "awaiting-tags")
-                 and not busy_elsewhere(read_json(p, {}))]
+        cands = [d for d in recording_dirs()
+                 if read_json(d / "info.json", {}).get("status") in ("failed", "stopped", "transcribing", "queued", "awaiting-tags")
+                 and not busy_elsewhere(read_json(d / "info.json", {}))]
         if not cands:
             fail("Nothing to retry.")
         rec_dir = cands[-1]
@@ -902,6 +1085,10 @@ def cmd_retry(args):
 
 
 def main():
+    # The recorder is a child of `meet start` and inherits this, so mic.wav and
+    # system.wav are created mode 0600 on top of the 0700 recordings directory.
+    os.umask(0o077)
+    harden_private_dirs()
     p = argparse.ArgumentParser(prog="meet", description="Local meeting recorder + transcriber.")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start", help="start recording")

@@ -57,7 +57,7 @@ Logic lives in `meet`. The app is a thin front end that only calls the CLI, so t
 Runtime locations:
 - Fixes: `~/.config/meet/fixes`, `heard => meant` lines applied to each segment's text right after whisper (`load_fixes`/`apply_fixes`).
 - Config: `~/.config/meet/config` (`KEY="value"`, `#` comments; env vars of the same name override). Keys: `MEET_INBOX` (required), `MEET_MIC`, `MEET_PROMPT`, `MEET_KEEP_AUDIO`, `MEET_MODEL`, `MEET_VAD_MODEL`, `MEET_THREADS`, `MEET_WHISPER`.
-- Data: `~/Library/Application Support/meet/` → `models/` (ggml-large-v3-turbo.bin, ggml-silero-v5.1.2.bin), `recordings/<id>/`, `current.json`, `history.json`.
+- Data: `~/Library/Application Support/meet/` → `models/` (ggml-large-v3-turbo.bin, ggml-silero-v5.1.2.bin), `recordings/<id>/`, `current.json`, `history.json`. `meet` keeps this directory, `~/Library/Logs/meet` and `~/.config/meet` mode 0700, and writes state files, the log and new transcripts mode 0600. `meet start` sets umask 077 so the recorder's WAVs are 0600 too.
 - Log: `~/Library/Logs/meet/meet.log`. Each recording's recorder log (timestamped) is copied in when it's processed.
 - Installed app: `~/Applications/Meet Transcriber.app` (a copy; `build.sh` refreshes it when it rebuilds the app). CLI: symlink `meet` → repo's `meet` in Homebrew's `bin` (or `~/.local/bin`).
 
@@ -79,7 +79,7 @@ Runtime locations:
 - Tags are only what the user enters (never the slug). Obsidian-safe (`tagify`): accents kept, numeric-only dropped. Frontmatter `tags: [...]` plus a `#tag` line; no line when empty.
 - `meet start` refuses if setup is incomplete (`setup_problems`), kills stray recorders, and waits up to 60 s for the recorder's `ready` (permission prompts).
 - `meet stop` sends SIGTERM, waits ≤10 s, then kills the process group. `--tags-later` makes the worker hold the transcript until `meet tag` (≤10 min after the stop, `TAG_WAIT`), then write it without tags.
-- `retry` never touches a recording another process is still stopping or transcribing (`busy_elsewhere`).
+- `retry` never touches a recording another process is still stopping or transcribing (`busy_elsewhere`). `meet tag`, `meet retry` and `meet _process` only accept a directory inside `recordings/`; a `..`, slash or symlink that points outside is refused, and a refused path is not deleted.
 
 ## Recorder (`capture/main.swift`)
 

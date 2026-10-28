@@ -9,6 +9,7 @@ SourceFileLoader + spec_from_loader. Run from the repo root:
 import datetime as dt
 import importlib.machinery
 import importlib.util
+import os
 import struct
 import tempfile
 import unittest
@@ -385,8 +386,26 @@ class WriteAtomicTests(unittest.TestCase):
             third = meet.write_atomic(inbox, "note", "third")
             self.assertEqual([first.name, second.name, third.name], ["note.md", "note-2.md", "note-3.md"])
             self.assertEqual(first.read_text(encoding="utf-8"), "café — já\n")
+            self.assertEqual(first.stat().st_mode & 0o777, 0o600)
             self.assertEqual(list(inbox.glob(".*")), [])
             self.assertTrue(inbox.is_dir())
+
+    def test_does_not_follow_a_symlink_or_overwrite_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            secret = tmp / "secret"
+            secret.write_text("keep")
+            inbox = tmp / "inbox"
+            inbox.mkdir()
+            tmp_link = inbox / f".note.md.{os.getpid()}.tmp"
+            tmp_link.symlink_to(secret)
+            (inbox / "note.md").symlink_to(secret)
+            written = meet.write_atomic(inbox, "note", "body\n")
+            self.assertEqual(written.name, "note-2.md")
+            self.assertEqual(written.read_text(encoding="utf-8"), "body\n")
+            self.assertEqual(written.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(secret.read_text(encoding="utf-8"), "keep")
+            self.assertFalse(tmp_link.exists())
 
 
 class RepairWavTests(unittest.TestCase):
@@ -427,6 +446,46 @@ class RepairWavTests(unittest.TestCase):
             short.write_bytes(b"RIFF")
             meet.repair_wav(short)
             self.assertEqual(short.read_bytes(), b"RIFF")
+
+
+class PrivacyTests(unittest.TestCase):
+    def test_recorder_command_is_exact(self):
+        binary = "/Users/me/meet.release/bin/meet-capture"
+        self.assertTrue(meet.is_recorder_command(binary, binary))
+        self.assertTrue(meet.is_recorder_command(binary + " /tmp/rec dir", binary))
+        self.assertTrue(meet.is_recorder_command("  " + binary + "  ", binary))
+        self.assertFalse(meet.is_recorder_command("vim " + binary, binary))
+        self.assertFalse(meet.is_recorder_command("pgrep -f " + binary, binary))
+        self.assertFalse(meet.is_recorder_command(binary + "-evil /tmp", binary))
+        self.assertFalse(meet.is_recorder_command("", binary))
+
+    def test_this_process_is_not_the_recorder(self):
+        self.assertFalse(meet.is_our_recorder(os.getpid()))
+
+    def test_recording_id_cannot_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            root = tmp / "recordings"
+            root.mkdir()
+            outside = tmp / "outside"
+            outside.mkdir()
+            (outside / "info.json").write_text("{}")
+            good = root / "2026-10-16_120000_demo"
+            good.mkdir()
+            (good / "info.json").write_text("{}")
+            (root / "linked").symlink_to(outside)
+            old = meet.RECORDINGS
+            meet.RECORDINGS = root
+            try:
+                self.assertEqual(meet.recording_from_id("2026-10-16_120000_demo"), good.resolve())
+                self.assertEqual(meet.recording_from_id("missing"), (root / "missing").resolve())
+                for bad in ("../outside", "..", ".", "/etc", "nested/id", "x/../../outside", "", "linked"):
+                    self.assertIsNone(meet.recording_from_id(bad), bad)
+                self.assertEqual(meet.recording_dirs(), [good.resolve()])
+                self.assertIsNone(meet.resolve_recording(outside))
+                self.assertIsNone(meet.resolve_recording(root))
+            finally:
+                meet.RECORDINGS = old
 
 
 if __name__ == "__main__":
