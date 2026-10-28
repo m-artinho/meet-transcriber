@@ -47,7 +47,11 @@ Non-interactive, e.g. when an agent sets it up for you:
 git pull && ./install.sh
 ```
 
-Your config (transcripts folder, mic, prompt) is kept, nothing is downloaded again, and only what changed is rebuilt. If you only changed the menu bar app or the CLI, `./build.sh` is enough.
+Your config (transcripts folder, mic, prompt) is kept, nothing is downloaded again, and only what changed is rebuilt.
+
+- `meet` itself needs no build: the command is a symlink to the repo, so a `git pull` is enough for CLI changes.
+- Menu bar app changes need `./build.sh`, which refreshes the copy in `~/Applications`; quit and reopen the app (or let `./install.sh` do it).
+- If the recorder (`capture/main.swift`) changed, the rebuild is re-signed and macOS asks for the Microphone and System Audio Recording permissions again.
 
 **Setting up with Claude Code:** open this folder in Claude Code and ask it to set up meet. [`CLAUDE.md`](CLAUDE.md) tells it what to ask you and which commands to run.
 
@@ -92,7 +96,7 @@ open "meetbar://stop?tags=team,q4" # or set them directly
 
 ```bash
 meet start "Pricing sync"   # 🔴 notification; recording runs in the background
-meet status                 # recording for 00:12:34 · mic: ok · system: ok
+meet status                 # 🔴 Recording 'Pricing sync' for 00:12:34, then mic/system levels
 meet stop                   # asks for tags, transcribes in the background, ✅ notification
 ```
 
@@ -186,7 +190,7 @@ meet stop  ─► SIGTERM → WAVs finalized → tags (prompt, --tags or later v
                 └─ write markdown atomically → delete recording dir → ✅ notification
 ```
 
-Files: `meet` is the CLI (Python 3 standard library only, runs on the system `/usr/bin/python3`). `capture/main.swift` is the recorder. `menubar/MeetBar.swift` is the menu bar app (an AppKit status item with a SwiftUI popover). `install.sh` and `build.sh` handle setup; `build.sh` rebuilds only what changed and refreshes the copy in `~/Applications`. The app icon is `menubar/AppIcon.icns`, drawn by `menubar/make-icon.swift` (see its header to regenerate).
+Files: `meet` is the CLI (Python 3 standard library only, runs on the system `/usr/bin/python3`). `capture/main.swift` is the recorder. `menubar/MeetBar.swift` is the menu bar app (an AppKit status item with a SwiftUI popover). `install.sh` and `build.sh` handle setup; `build.sh` rebuilds only what changed and refreshes the copy in `~/Applications`. The app icon is `menubar/AppIcon.icns`, drawn by `menubar/make-icon.swift` (see its header to regenerate). Unit tests are in `tests/`.
 
 Notes:
 - **Start-up order.** The mic starts first and `meet start` returns as soon as it's running. If macOS's audio service is slow to start the system-audio tap (rare, but it can take tens of seconds), the system track joins when it's ready; until then `meet status` and the app show it as `starting…`. The recorder log in `meet.log` has timestamps for each step.
