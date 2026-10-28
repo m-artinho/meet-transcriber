@@ -66,32 +66,44 @@ fi
 echo "==> Models in $MODELS"
 mkdir -p "$MODELS"
 fetch() { # file url size sha1
-  local f="$MODELS/$1"
-  if [ -f "$f" ]; then echo "found $1"; return; fi
+  local f="$MODELS/$1" sum
+  sum=$(shasum -a 1 "$f" 2>/dev/null | cut -d' ' -f1 || true)
+  if [ -f "$f" ] && [ "$sum" = "$4" ]; then echo "found $1"; return; fi
+  if [ -f "$f" ]; then die "checksum mismatch for existing $1. Delete it and re-run to download again: $f"; fi
   if ask "Download $1 ($3) from $2?"; then
-    curl -fL --retry 3 -o "$f.part" "$2"
+    # HTTPS only, including redirects. The SHA-1 below is what actually pins the bytes.
+    curl --proto '=https' --proto-redir '=https' -fL --retry 3 -o "$f.part" "$2"
     if [ "$(shasum -a 1 "$f.part" | cut -d' ' -f1)" != "$4" ]; then rm -f "$f.part"; die "checksum mismatch for $1"; fi
     mv "$f.part" "$f"
+    chmod 600 "$f" || true
   fi
 }
 fetch ggml-large-v3-turbo.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin "~1.6 GB" 4af2b29d7ec73d781377bfd1758ca957a807e941
 fetch ggml-silero-v5.1.2.bin https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin "~1 MB" a372f48dcf0bd9e4330eef2802bc46e061c19634
 
 echo "==> Config $CONFIG"
+if [ -L "$CONFIG" ] || [ -L "$(dirname "$CONFIG")" ]; then
+  die "refusing to follow a symlink at $CONFIG"
+fi
+mkdir -p "$(dirname "$CONFIG")"
+chmod 700 "$(dirname "$CONFIG")"
 if [ -f "$CONFIG" ] && [ -z "$INBOX$MIC$PROMPT" ]; then
+  chmod 600 "$CONFIG"
   echo "exists, leaving it alone"
 else
   if [ -z "$INBOX" ] && [ ! -f "$CONFIG" ]; then
     [ "$YES" = 1 ] && die "--inbox is required with --yes when no config exists yet"
     read -r -p "Folder for transcripts (e.g. ~/Notes/Meetings): " INBOX
   fi
-  mkdir -p "$(dirname "$CONFIG")"
   [ -f "$CONFIG" ] || cp config.example "$CONFIG"
+  chmod 600 "$CONFIG"
   # Set KEY="value" in the config (replacing an existing or commented-out line).
   set_key() {
     /usr/bin/python3 - "$CONFIG" "$1" "$2" <<'PY'
 import re, sys
 path, key, value = sys.argv[1:]
+if "\n" in value or "\r" in value:
+    sys.exit("config values cannot contain newlines")
 text = open(path).read()
 line = f'{key}="{value}"'
 for pat in (rf"^{key}=.*$", rf"^#\s*{key}=.*$"):  # prefer the active line over a commented one
@@ -106,6 +118,7 @@ PY
   [ -n "$INBOX" ] && set_key MEET_INBOX "$INBOX"
   [ -n "$MIC" ] && set_key MEET_MIC "$MIC"
   [ -n "$PROMPT" ] && set_key MEET_PROMPT "$PROMPT"
+  chmod 600 "$CONFIG"
   echo "wrote $CONFIG"
 fi
 

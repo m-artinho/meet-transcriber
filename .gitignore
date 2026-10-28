@@ -5,3 +5,10 @@ test-inbox/
 CLAUDE.local.md
 __pycache__/
 *.pyc
+
+# Runtime leftovers, if a checkout is ever used as the inbox or data dir.
+recordings/
+*.log
+*.part
+.env
+.env.*

@@ -183,6 +183,7 @@ Notes:
 - **Headphones vs speakers.** On speakers your mic also hears the other side. `meet` removes word runs in your track that repeat what "Them" said at the same moment, drops what's left if it's still mostly an echo, and drops faint mic segments that overlap "Them". Headphones still give the cleanest result.
 - **Voice Isolation** and other macOS mic modes apply only inside apps that use Apple's voice processing (Teams, FaceTime…). `meet` records the raw mic on purpose, so other audio never gets ducked.
 - **Synced inbox.** If `MEET_INBOX` is inside iCloud Drive or another synced folder, transcripts sync with it. Audio never does.
+- **Other accounts on this Mac.** Recordings, the log and `~/.config/meet` are owner-only (mode 0700). New transcripts are written mode 0600. Audio and notes stay unreadable to other user accounts on the machine.
 
 ## Troubleshooting
 
