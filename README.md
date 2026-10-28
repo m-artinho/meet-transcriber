@@ -74,7 +74,8 @@ Click the mic icon in the menu bar:
 
 - **First run:** if no transcripts folder is set yet, the panel opens with **Choose folder…** (a Finder picker) before anything else.
 - **Idle:** type the meeting name (optional) and click **Start recording**. With no name, the transcript is titled "Meeting" (`2026-10-28_1750_meeting.md`).
-- **Recording:** the menu bar shows a red dot and the elapsed time. The panel shows live mic and system levels with warnings (silent, dropping audio) and **Stop recording**.
+- **Recording:** the menu bar shows a red dot and the elapsed time. The panel shows live mic and system levels, each with a status: a check for ok, or a warning triangle for "silent" (no audio at all, usually a missing permission; hover for the hint) or "dropping audio". Then **Stop recording**.
+- **Recorder crashed** (orange triangle in the menu bar): the panel offers **Transcribe what was captured**.
 - **After stopping:** the panel asks for tags (the icon is an orange tag). Transcription starts right away in the background, but the transcript is only written once you **Save tags** or **Skip**. If you don't answer, it's written without tags 10 minutes after the stop (the panel counts down). Stopping from a hotkey or `meetbar://stop` opens this step automatically. As you type, tags you've used before are suggested (most used first): ↑/↓ to choose, Enter or Tab to pick, Esc to dismiss; a comma or space starts the next tag. Enter never saves or starts anything in the panel; only the buttons do.
 - **Transcribing:** an hourglass icon, and the panel shows how long it has been running. Failed transcriptions get a **Retry** button.
 - **Always:** your last transcripts (click to open) and **Transcripts**, which opens the inbox folder.

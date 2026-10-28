@@ -53,6 +53,8 @@ Logic lives in `meet`. The app is a thin front end that only calls the CLI, so t
 | `build.sh` | Builds `bin/meet-capture` and `bin/app.noindex/Meet Transcriber.app`, each only if its sources changed. |
 | `install.sh` | Interactive or flag-driven setup (see above). |
 | `config.example` | Documented config template. |
+| `tests/test_meet.py` | stdlib unittest for the CLI's pure helpers: config parsing/writing, slugs and tags, times, hallucination/repeat filters, bleed removal, languages, markdown, atomic writes, WAV repair, private file modes. |
+| `CLAUDE.local.md` | Git-ignored: the current user's machine, config and open items. |
 
 Runtime locations:
 - Fixes: `~/.config/meet/fixes`, `heard => meant` lines applied to each segment's text right after whisper (`load_fixes`/`apply_fixes`).
@@ -79,6 +81,8 @@ Runtime locations:
 - `meet config --inbox/--mic/--prompt` edits the config file in place (`set_config`: replaces the active line, else a commented one, else appends; a missing file starts from `config.example`, whose `MEET_INBOX` is empty on purpose). The inbox is stored as an absolute path. `--get KEY` prints the effective value (env included); install.sh uses it to decide whether to ask.
 - Tags are only what the user enters (never the slug). Obsidian-safe (`tagify`): accents kept, numeric-only dropped. Frontmatter `tags: [...]` plus a `#tag` line; no line when empty.
 - `meet start` refuses if setup is incomplete (`setup_problems`), kills stray recorders, and waits up to 60 s for the recorder's `ready` (permission prompts).
+- `meet stop` on a crashed recording (`current.json` exists but its pid is dead; `status --json` → `alive: false`) repairs the WAV headers (`repair_wav`) and transcribes what was captured.
+- Process safety: `kill_strays` and `is_our_recorder` only act on processes whose command line *is* this repo's `bin/meet-capture` (not anything that merely mentions the path, like an editor or `pgrep`).
 - `meet stop` sends SIGTERM, waits ≤10 s, then kills the process group. `--tags-later` makes the worker hold the transcript until `meet tag` (≤10 min after the stop, `TAG_WAIT`), then write it without tags.
 - `retry` never touches a recording another process is still stopping or transcribing (`busy_elsewhere`). `meet tag`, `meet retry` and `meet _process` only accept a directory inside `recordings/`; a `..`, slash or symlink that points outside is refused, and a refused path is not deleted.
 
@@ -104,9 +108,16 @@ Runtime locations:
 ## Menu bar app (`menubar/MeetBar.swift`)
 
 - `Model` (singleton) polls `meet status --json` every 2 s (busy) / 5 s (idle), never overlapping. It runs CLI calls with stdout/stderr kept apart, an augmented `PATH` (GUI apps get a minimal one), stdin `/dev/null`. Arguments are argparse-safe: `start -- <name>`, `--tags=<tags>`. The CLI path is `MeetCLIPath` from Info.plist, then the usual install locations.
-- **Menu bar icon:** mic (idle), red dot + timer (recording), orange "!" when quiet, orange tag (waiting for tags), hourglass (transcribing).
+- **Menu bar icon:** mic (idle), red dot + timer (recording), orange "!" when quiet, orange triangle (recorder died; the panel offers "Transcribe what was captured" = `meet stop`), orange tag (waiting for tags), hourglass (transcribing).
 - **First run:** when `status --json` has an empty `inbox`, the panel shows a **Choose folder…** step (`NSOpenPanel` → `meet config --inbox=…`) instead of the name field, and opens itself once (`showPanel`). ⋯ → Change transcripts folder reuses the picker.
 - **Panel flow:** name (optional; empty = "Meeting") → Start (Enter never triggers a step; only buttons do); while recording, levels plus Stop recording; then the **Add tags** step (Stop runs `stop --tags-later`; Save/Skip run `meet tag`; `TagField`, an `NSTextField` wrapper, drives suggestions from `known_tags` with ↑/↓/Enter/Tab/Esc); jobs with Retry; Recent; ⋯ menu (Check setup = `meet doctor`, Change transcripts folder, Open at login via `SMAppService`, Open log, Quit).
+- **Panel layout** (from a design review, 2026-10-28; keep these when changing the UI):
+  - Native macOS look only: system fonts and colors, SF Symbols, standard controls, light + dark. No custom design tokens, branding or dependencies. Fixed 320 pt width; height follows content.
+  - Spacing: 16 pt between groups (the panel's top-level `VStack`), 8 pt between elements inside a group.
+  - Idle: Start is disabled only while a CLI call is running. The name is optional; empty starts as "Meeting" (the filename already has the date and time).
+  - `LevelRow`: a fixed 50 pt label column, a bar that fills the rest, and a fixed 96 pt trailing status column, so both bars line up. States: ok (green check + secondary "ok"), warning (orange triangle + primary text: "silent" after 15 s with no audio at all, "dropping audio" when >20% of recent audio is gap padding), pending (secondary text, no icon: "waiting…", "starting…", "silent" in the first 15 s). The permission hint for "silent" is a tooltip. State is never shown by color alone.
+  - Tags step: suggestions are a plain list under the field (no box; highlighted row `Color.accentColor.opacity(0.2)`, 4 pt corners). One caption line counts down to the auto-save: `Model.tagsDeadline` = 600 s after `stopped_at`, the same as `TAG_WAIT`.
+  - Job rows: `Transcribing "<name>"…` with the time since the stop (`Model.sinceStop`); failed or interrupted jobs get Retry.
 - **Watchdog:** notification if system audio has been quiet (<0.003 peak) for 15 min (repeats every 30 min), and hourly after 3 h. It never auto-stops.
 - **URLs:** `meetbar://start?name=…`, `meetbar://stop` (opens the tags step), `meetbar://stop?tags=…`. Handy for testing the app's real code path from a shell.
 - **Popover, not `MenuBarExtra`:** the latter leaves ghost space when content height changes. The popover hosts with `sizingOptions = .preferredContentSize`, and the panel uses `.fixedSize(horizontal: false, vertical: true)`.
@@ -119,6 +130,7 @@ Runtime locations:
   - **Why a temp dir:** if the repo lives in iCloud Drive, the file provider adds Finder info to any `.app` created there, and codesign rejects it.
   - **Why `xattr -cr` before `codesign`:** files created from some parent apps (e.g. the Claude desktop app) carry attributes that make codesign fail ("resource fork… detritus"), plus a quarantine flag that makes macOS translocate the app.
 - After rebuilding the app, restart it: `pkill -f MacOS/MeetTranscriber; open ~/Applications/"Meet Transcriber.app"`.
+- **Updating an install:** `git pull && ./install.sh`. It keeps the config (folder, mic, prompt), finds the models, skips the symlink if it's already in place, and asks whether to reinstall/reopen the app. CLI changes are live right after `git pull` (the `meet` command is a symlink to the repo); app changes need `./build.sh` and a restart; recorder changes re-prompt for permissions.
 
 ## Testing safely
 
@@ -156,6 +168,7 @@ Runtime locations:
 
 ## Conventions
 
+- `git pull --rebase` before changing anything: the repo is edited from more than one Mac, and cloud agents open PRs (branches like `cursor/*`) that get merged on GitHub.
 - Match the existing style; keep the app thin and put behavior in `meet`.
 - Update README.md (user-facing) and this file when behavior changes.
 - Commits end with a `Co-Authored-By` line for Claude. Only commit or push when the user asks.
