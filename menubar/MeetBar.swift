@@ -153,11 +153,14 @@ final class Model: ObservableObject {
     private var askedForTags: Set<String> = []
     private var askedForInbox = false
 
-    /// Seconds until the transcript is written without tags.
-    func tagsDeadline(_ job: Job) -> TimeInterval? {
+    /// Seconds since the recording was stopped (transcription starts then).
+    func sinceStop(_ job: Job) -> TimeInterval? {
         guard let s = job.stopped_at, let stopped = iso.date(from: s) else { return nil }
-        return max(0, 600 - now.timeIntervalSince(stopped))
+        return now.timeIntervalSince(stopped)
     }
+
+    /// Seconds until the transcript is written without tags.
+    func tagsDeadline(_ job: Job) -> TimeInterval? { sinceStop(job).map { max(0, 600 - $0) } }
 
     var isTranscribing: Bool { status?.jobs.contains { $0.state == "transcribing" || $0.state == "stopping" } == true }
     var isQuiet: Bool { isRecording && quietFor >= Model.quietAlert }
@@ -347,27 +350,45 @@ struct LevelRow: View {
         return max(-80, 20 * log10(p))
     }
 
-    var note: (String, Color) {
-        guard let l = levels else { return ("waiting…", .secondary) }
-        if (l.seconds ?? 0) == 0 { return ("starting…", .secondary) }
-        if l.peak_max == 0 { return (elapsed > 15 ? "silent — permission?" : "silent", elapsed > 15 ? .orange : .secondary) }
-        if (l.filled_recent ?? 0) > 0.2 { return ("dropping audio", .orange) }
-        return ("ok", .green)
+    enum State { case ok, warning, pending }
+
+    var note: (String, State) {
+        guard let l = levels else { return ("waiting…", .pending) }
+        if (l.seconds ?? 0) == 0 { return ("starting…", .pending) }
+        if l.peak_max == 0 { return elapsed > 15 ? ("silent", .warning) : ("silent", .pending) }
+        if (l.filled_recent ?? 0) > 0.2 { return ("dropping audio", .warning) }
+        return ("ok", .ok)
     }
 
     var body: some View {
+        let (text, state) = note
         HStack(spacing: 8) {
             Text(label).frame(width: 50, alignment: .leading)
             GeometryReader { g in
                 ZStack(alignment: .leading) {
                     Capsule().fill(.quaternary)
-                    Capsule().fill(note.1 == .orange ? Color.orange : Color.green)
+                    Capsule().fill(state == .warning ? Color.orange : Color.green)
                         .frame(width: g.size.width * CGFloat((db + 80) / 80))
                 }
             }
             .frame(height: 6)
-            Text(note.0).font(.caption).foregroundStyle(note.1).frame(width: 110, alignment: .trailing)
+            HStack(spacing: 3) {
+                switch state {
+                case .ok:
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text(text).foregroundStyle(.secondary)
+                case .warning:
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text(text).foregroundStyle(.primary)
+                case .pending:
+                    Text(text).foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+            .lineLimit(1)
+            .frame(width: 96, alignment: .trailing)
         }
+        .help(state == .warning && text == "silent" ? "No audio at all: check the permission for meet-capture (System Audio Recording / Microphone)." : "")
     }
 }
 
@@ -380,7 +401,7 @@ struct Panel: View {
     enum Field { case name, tags }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
             if let r = model.recording {
                 if r.alive { recordingSection(r) } else { crashedSection(r) }
             }
@@ -409,7 +430,7 @@ struct Panel: View {
     private var idleSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("New recording").font(.headline)
-            TextField("Meeting name", text: $name)
+            TextField("Meeting name (optional)", text: $name)
                 .textFieldStyle(.roundedBorder)
                 .focused($focus, equals: .name)
             Button(action: startIfValid) {
@@ -417,7 +438,7 @@ struct Panel: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.red)
-            .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || model.busy != nil)
+            .disabled(model.busy != nil)
         }
         .onAppear { focus = .name }
         .onReceive(NotificationCenter.default.publisher(for: NSPopover.didShowNotification)) { _ in
@@ -438,14 +459,15 @@ struct Panel: View {
         }
     }
 
+    /// Starts with the typed name, or "Meeting" when it's empty (the filename already has the date and time).
     private func startIfValid() {
+        guard model.busy == nil else { return }
         let n = name.trimmingCharacters(in: .whitespaces)
-        guard !n.isEmpty, model.busy == nil else { return }
-        model.start(n) { name = "" }
+        model.start(n.isEmpty ? "Meeting" : n) { name = "" }
     }
 
     private func recordingSection(_ r: Recording) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: "record.circle.fill").foregroundStyle(.red)
                 Text(r.name).font(.headline).lineLimit(1)
@@ -484,15 +506,14 @@ struct Panel: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(tagSuggestions.enumerated()), id: \.element) { i, tag in
                         Text("#" + tag)
+                            .font(.body)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 6).padding(.vertical, 3)
-                            .background(i == picked ? Color.accentColor.opacity(0.25) : .clear, in: RoundedRectangle(cornerRadius: 4))
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(i == picked ? Color.accentColor.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 4))
                             .contentShape(Rectangle())
                             .onTapGesture { acceptTag(tag) }
                     }
                 }
-                .padding(3)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
             }
             HStack {
                 Button("Skip") { model.tag(job.id, "") { tags = "" } }
@@ -501,12 +522,10 @@ struct Panel: View {
                     .buttonStyle(.borderedProminent)
             }
             .disabled(model.busy != nil)
-            Group {
-                if job.state == "awaiting-tags" { Text("Transcript is ready and waiting for your tags.") }
-                else { Text("Transcribing in the background meanwhile.") }
-                if let left = model.tagsDeadline(job) { Text("Saved without tags in \(max(1, Int(left / 60 + 0.99))) min if you skip this.") }
-            }
-            .font(.caption).foregroundStyle(.secondary)
+            Text((job.state == "awaiting-tags" ? "Transcript ready." : "Transcribing in the background.")
+                 + (model.tagsDeadline(job).map { " Saving without tags in \(hms($0))." } ?? ""))
+                .monospacedDigit()
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -565,7 +584,12 @@ struct Panel: View {
                     HStack(spacing: 6) {
                         if ["transcribing", "stopping", "awaiting-tags"].contains(job.state) {
                             ProgressView().controlSize(.small)
-                            Text(job.state == "stopping" ? "Stopping \(job.name)…" : "Transcribing \(job.name)…").lineLimit(1)
+                            Text(job.state == "stopping" ? "Stopping \"\(job.name)\"…" : "Transcribing \"\(job.name)\"…")
+                                .lineLimit(1).truncationMode(.middle)
+                            if job.state != "stopping", let t = model.sinceStop(job) {
+                                Spacer()
+                                Text(hms(t)).monospacedDigit().foregroundStyle(.secondary)
+                            }
                         } else {
                             Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
                             Text("\(job.name): \(job.state)").lineLimit(1).help(job.error ?? "")

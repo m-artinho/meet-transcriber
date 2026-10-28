@@ -73,10 +73,10 @@ The helper is ad-hoc signed, and macOS ties the grants to its signature. A rebui
 Click the mic icon in the menu bar:
 
 - **First run:** if no transcripts folder is set yet, the panel opens with **Choose folder…** (a Finder picker) before anything else.
-- **Idle:** type the meeting name and click **Start recording**.
+- **Idle:** type the meeting name (optional) and click **Start recording**. With no name, the transcript is titled "Meeting" (`2026-10-28_1750_meeting.md`).
 - **Recording:** the menu bar shows a red dot and the elapsed time. The panel shows live mic and system levels with warnings (silent, dropping audio) and **Stop recording**.
-- **After stopping:** the panel asks for tags (the icon is an orange tag). Transcription starts right away in the background, but the transcript is only written once you **Save tags** or **Skip**. If you don't answer, it's written without tags 10 minutes after the stop. Stopping from a hotkey or `meetbar://stop` opens this step automatically. As you type, tags you've used before are suggested (most used first): ↑/↓ to choose, Enter or Tab to pick, Esc to dismiss; a comma or space starts the next tag. Enter never saves or starts anything in the panel; only the buttons do.
-- **Transcribing:** an hourglass icon. Failed transcriptions get a **Retry** button.
+- **After stopping:** the panel asks for tags (the icon is an orange tag). Transcription starts right away in the background, but the transcript is only written once you **Save tags** or **Skip**. If you don't answer, it's written without tags 10 minutes after the stop (the panel counts down). Stopping from a hotkey or `meetbar://stop` opens this step automatically. As you type, tags you've used before are suggested (most used first): ↑/↓ to choose, Enter or Tab to pick, Esc to dismiss; a comma or space starts the next tag. Enter never saves or starts anything in the panel; only the buttons do.
+- **Transcribing:** an hourglass icon, and the panel shows how long it has been running. Failed transcriptions get a **Retry** button.
 - **Always:** your last transcripts (click to open) and **Transcripts**, which opens the inbox folder.
 - **⋯ menu:** Check setup (`meet doctor`), Change transcripts folder, Open at login, Open log, Quit. Quitting the app doesn't stop a recording.
 
