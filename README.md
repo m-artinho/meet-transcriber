@@ -28,7 +28,7 @@ The installer does the following, asking before each install or download (no sud
 2. Builds `bin/meet-capture` (the Swift recorder) and `bin/app.noindex/Meet Transcriber.app` (the menu bar app; `.noindex` keeps this build copy out of Spotlight).
 3. Offers to `brew install whisper-cpp`.
 4. Downloads the models into `~/Library/Application Support/meet/models/`: large-v3-turbo (~1.6 GB) and Silero VAD (~1 MB), both checksum-verified.
-5. Asks where transcripts should go and writes `~/.config/meet/config`.
+5. Asks where transcripts should go (a Finder folder picker, or type a path) and writes `~/.config/meet/config`. On later runs it keeps the folder you already chose.
 6. Symlinks `meet` into your Homebrew `bin`, or `~/.local/bin` if that isn't writable.
 7. Copies **Meet Transcriber** into `~/Applications` and opens it. It's in Spotlight too (⌘Space, "Meet Transcriber").
 8. Runs `meet doctor`.
@@ -38,6 +38,16 @@ Non-interactive, e.g. when an agent sets it up for you:
 ```bash
 ./install.sh --yes --inbox "~/Notes/Meetings" [--mic "MacBook Pro Microphone"] [--prompt "Hi everyone, let's get started."]
 ```
+
+`--inbox` is only needed the first time; re-runs keep the configured folder.
+
+### Updating
+
+```bash
+git pull && ./install.sh
+```
+
+Your config (transcripts folder, mic, prompt) is kept, nothing is downloaded again, and only what changed is rebuilt. If you only changed the menu bar app or the CLI, `./build.sh` is enough.
 
 **Setting up with Claude Code:** open this folder in Claude Code and ask it to set up meet. [`CLAUDE.md`](CLAUDE.md) tells it what to ask you and which commands to run.
 
@@ -58,12 +68,13 @@ The helper is ad-hoc signed, and macOS ties the grants to its signature. A rebui
 
 Click the mic icon in the menu bar:
 
+- **First run:** if no transcripts folder is set yet, the panel opens with **Choose folder…** (a Finder picker) before anything else.
 - **Idle:** type the meeting name and click **Start recording**.
 - **Recording:** the menu bar shows a red dot and the elapsed time. The panel shows live mic and system levels with warnings (silent, dropping audio) and **Stop recording**.
 - **After stopping:** the panel asks for tags (the icon is an orange tag). Transcription starts right away in the background, but the transcript is only written once you **Save tags** or **Skip**. If you don't answer, it's written without tags 10 minutes after the stop. Stopping from a hotkey or `meetbar://stop` opens this step automatically. As you type, tags you've used before are suggested (most used first): ↑/↓ to choose, Enter or Tab to pick, Esc to dismiss; a comma or space starts the next tag. Enter never saves or starts anything in the panel; only the buttons do.
 - **Transcribing:** an hourglass icon. Failed transcriptions get a **Retry** button.
 - **Always:** your last transcripts (click to open) and **Transcripts**, which opens the inbox folder.
-- **⋯ menu:** Check setup (`meet doctor`), Open at login, Open log, Quit. Quitting the app doesn't stop a recording.
+- **⋯ menu:** Check setup (`meet doctor`), Change transcripts folder, Open at login, Open log, Quit. Quitting the app doesn't stop a recording.
 
 **So a recording doesn't run all night:** if there's been no meeting audio for 15 minutes, the icon turns orange and you get a notification (repeated every 30 minutes). After 3 hours you also get an hourly reminder. Nothing is stopped automatically.
 
@@ -93,6 +104,7 @@ The name you give at `meet start` is the transcript's title. Its slug (`pricing-
 - `meet start <name> --keep-audio` or `meet stop --keep-audio` keeps the WAVs after success.
 - `meet retry [id]` re-runs a failed or interrupted transcription (latest by default).
 - `meet doctor` checks the setup and lists input devices.
+- `meet config` shows the settings; `meet config --inbox <dir>` (or `--mic`, `--prompt`) changes them, `meet config --get MEET_INBOX` prints one.
 - `meet status --json` prints the same information as `meet status` as JSON, for scripts and the menu bar app.
 
 Transcription runs at roughly 15–20× real time on an M4 Pro, so an hour-long meeting takes a few minutes.
@@ -152,7 +164,7 @@ The file is written to a hidden `.tmp` file and then renamed, so a folder watche
 | `MEET_THREADS` | `8` | whisper CPU threads |
 | `MEET_WHISPER` | `whisper-cli` from PATH | whisper.cpp binary |
 
-- **Change where transcripts go:** edit `MEET_INBOX`, or re-run `./install.sh --inbox <dir>`.
+- **Change where transcripts go:** ⋯ → Change transcripts folder in the app, `meet config --inbox <dir>`, or edit `MEET_INBOX`.
 - **Change the model:** download another ggml model from <https://huggingface.co/ggerganov/whisper.cpp> into the models folder and point `MEET_MODEL` at it. For example, `ggml-large-v3.bin` for maximum accuracy, or `ggml-large-v3-turbo-q5_0.bin` for a smaller file.
 - **Fix words whisper keeps mishearing:** add `heard => meant` lines to `~/.config/meet/fixes`, e.g. `Rozzie API => RASI API`. Case-insensitive, whole words, applied to every new transcript. Putting the right spelling in `MEET_PROMPT` can also help whisper get it right in the first place.
 - **Other languages:** whisper auto-detects the language per track. Set `MEET_PROMPT` to a sentence in your language(s); the frontmatter `language` field uses whisper's detection, plus an extra EN/PT stopword check.

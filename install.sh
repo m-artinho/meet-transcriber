@@ -7,7 +7,8 @@
 # Interactive:      ./install.sh
 # Non-interactive:  ./install.sh --yes --inbox ~/Notes/Meetings [--mic "C922"] [--prompt "..."] [--link-dir DIR] [--no-link] [--no-app]
 #   --yes           answer yes to every question (brew install, downloads, symlink)
-#   --inbox DIR     folder where transcripts are written (required if no config exists yet)
+#   --inbox DIR     folder where transcripts are written (required on a first install;
+#                   on later runs the configured folder is kept unless this is given)
 #   --mic NAME      part of the input device name to record (default: system default input)
 #   --prompt TXT    whisper initial prompt, in your meeting language(s)
 #   --link-dir DIR  directory to symlink `meet` into (default: Homebrew bin if writable, else ~/.local/bin)
@@ -29,7 +30,7 @@ while [ $# -gt 0 ]; do
     --link-dir) LINK_DIR="$2"; shift ;;
     --no-link) LINK=0 ;;
     --no-app) APP=0 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -87,38 +88,42 @@ if [ -L "$CONFIG" ] || [ -L "$(dirname "$CONFIG")" ]; then
 fi
 mkdir -p "$(dirname "$CONFIG")"
 chmod 700 "$(dirname "$CONFIG")"
-if [ -f "$CONFIG" ] && [ -z "$INBOX$MIC$PROMPT" ]; then
-  chmod 600 "$CONFIG"
-  echo "exists, leaving it alone"
-else
-  if [ -z "$INBOX" ] && [ ! -f "$CONFIG" ]; then
-    [ "$YES" = 1 ] && die "--inbox is required with --yes when no config exists yet"
-    read -r -p "Folder for transcripts (e.g. ~/Notes/Meetings): " INBOX
+[ -f "$CONFIG" ] && chmod 600 "$CONFIG"
+
+# First install: ask for the transcripts folder (Finder picker, or a typed path).
+# Re-runs (updates) keep the folder already configured; --inbox changes it.
+choose_inbox() {
+  local dir
+  echo "Choose the folder where transcripts (.md) will be written (e.g. a folder in your Obsidian vault)." >&2
+  while true; do
+    dir=$(osascript -e 'activate' -e 'POSIX path of (choose folder with prompt "Folder for meeting transcripts (.md)")' 2>/dev/null || true)
+    if [ -z "$dir" ]; then
+      read -r -p "Folder for transcripts (path, or Enter to open the Finder picker again): " dir || return 1
+      dir="${dir/#\~/$HOME}"
+    fi
+    [ -n "$dir" ] || continue
+    dir="${dir%/}"
+    if [ -d "$dir" ]; then echo "$dir"; return; fi
+    if [ -e "$dir" ]; then echo "Not a folder: $dir" >&2; continue; fi
+    if ask "$dir doesn't exist. Create it?" >&2; then mkdir -p "$dir" && echo "$dir" && return; fi
+  done
+}
+CURRENT_INBOX=$("$ROOT/meet" config --get MEET_INBOX 2>/dev/null || true)
+if [ -z "$INBOX" ]; then
+  if [ -n "$CURRENT_INBOX" ]; then
+    echo "Transcripts folder: $CURRENT_INBOX (keeping it; --inbox <dir> changes it)"
+  elif [ "$YES" = 1 ]; then
+    die "--inbox is required with --yes when no transcripts folder is configured yet"
+  else
+    INBOX=$(choose_inbox) || die "no transcripts folder chosen; re-run, or pass --inbox <dir>"
   fi
-  [ -f "$CONFIG" ] || cp config.example "$CONFIG"
-  chmod 600 "$CONFIG"
-  # Set KEY="value" in the config (replacing an existing or commented-out line).
-  set_key() {
-    /usr/bin/python3 - "$CONFIG" "$1" "$2" <<'PY'
-import re, sys
-path, key, value = sys.argv[1:]
-if "\n" in value or "\r" in value:
-    sys.exit("config values cannot contain newlines")
-text = open(path).read()
-line = f'{key}="{value}"'
-for pat in (rf"^{key}=.*$", rf"^#\s*{key}=.*$"):  # prefer the active line over a commented one
-    if re.search(pat, text, re.M):
-        text = re.sub(pat, lambda m: line, text, count=1, flags=re.M)
-        break
-else:
-    text = text.rstrip("\n") + "\n" + line + "\n"
-open(path, "w").write(text)
-PY
-  }
-  [ -n "$INBOX" ] && set_key MEET_INBOX "$INBOX"
-  [ -n "$MIC" ] && set_key MEET_MIC "$MIC"
-  [ -n "$PROMPT" ] && set_key MEET_PROMPT "$PROMPT"
-  chmod 600 "$CONFIG"
+fi
+SET=()
+[ -n "$INBOX" ] && SET+=(--inbox "$INBOX")
+[ -n "$MIC" ] && SET+=(--mic "$MIC")
+[ -n "$PROMPT" ] && SET+=(--prompt "$PROMPT")
+if [ ${#SET[@]} -gt 0 ]; then
+  "$ROOT/meet" config "${SET[@]}"
   echo "wrote $CONFIG"
 fi
 
@@ -127,7 +132,9 @@ if [ "$LINK" = 1 ]; then
     if command -v brew >/dev/null && [ -w "$(brew --prefix)/bin" ]; then LINK_DIR="$(brew --prefix)/bin"; else LINK_DIR="$HOME/.local/bin"; fi
   fi
   echo "==> Linking $LINK_DIR/meet -> $ROOT/meet"
-  if ask "Create the symlink?"; then
+  if [ "$(readlink "$LINK_DIR/meet" 2>/dev/null)" = "$ROOT/meet" ]; then
+    echo "already linked"
+  elif ask "Create the symlink?"; then
     mkdir -p "$LINK_DIR"
     ln -sf "$ROOT/meet" "$LINK_DIR/meet"
     case ":$PATH:" in *":$LINK_DIR:"*) ;; *) echo "note: $LINK_DIR is not in your PATH; add it to your shell profile" ;; esac

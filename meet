@@ -7,6 +7,7 @@
   meet status [--json]
   meet retry [recording-id] [--wait]
   meet doctor            check the setup and list input devices
+  meet config [--inbox DIR] [--mic NAME] [--prompt TEXT] [--get KEY]
 
 Config: ~/.config/meet/config (KEY=VALUE); environment variables override it.
 """
@@ -96,6 +97,36 @@ def parse_value(v):
         end = v.rfind(v[0])  # last quote, so values may contain the quote character
         return v[1:end] if end > 0 else v[1:]
     return v.split(" #", 1)[0].strip()
+
+
+def set_config(values, path=None):
+    """Set KEY="value" lines in the config file: replaces the active line, else a
+    commented-out one, else appends. Other lines (comments, other keys) are kept.
+    A missing file starts from config.example."""
+    path = Path(path or CONFIG_FILE)
+    if path.is_symlink():
+        raise ValueError(f"refusing to follow a symlink at {path}")
+    for key, value in values.items():
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"{key} can't contain a newline")
+    if path.exists():
+        text = path.read_text()
+    else:
+        example = ROOT / "config.example"
+        text = example.read_text() if example.exists() else ""
+    for key, value in values.items():
+        line = f'{key}="{value}"'
+        for pat in (rf"^{key}=.*$", rf"^#\s*{key}=.*$"):  # prefer the active line over a commented one
+            if re.search(pat, text, re.M):
+                text = re.sub(pat, lambda m: line, text, count=1, flags=re.M)
+                break
+        else:
+            text = text.rstrip("\n") + "\n" + line + "\n"
+    ensure_private_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 def truthy(v):
@@ -1010,7 +1041,8 @@ def setup_problems(cfg):
     if not CAPTURE_BIN.exists():
         problems.append(f"recorder not built: run {ROOT / 'build.sh'}")
     if not cfg["MEET_INBOX"]:
-        problems.append(f"MEET_INBOX is not set (in {CONFIG_FILE} or the environment)")
+        problems.append("no folder for transcripts yet: choose one in the menu bar app, "
+                        "or run `meet config --inbox <folder>`")
     for key, hint in (("MEET_WHISPER", "brew install whisper-cpp"),
                       ("MEET_MODEL", "run install.sh to download it"),
                       ("MEET_VAD_MODEL", "run install.sh to download it")):
@@ -1019,11 +1051,15 @@ def setup_problems(cfg):
     return problems
 
 
-def cmd_doctor(args):
-    cfg = load_config()
+def print_config(cfg):
     print(f"Config file: {CONFIG_FILE}" + ("" if CONFIG_FILE.exists() else " (missing; defaults in use)"))
     for k in sorted(cfg):
         print(f"  {k} = {cfg[k]}")
+
+
+def cmd_doctor(args):
+    cfg = load_config()
+    print_config(cfg)
     problems = setup_problems(cfg)
     inbox = Path(cfg["MEET_INBOX"]) if cfg["MEET_INBOX"] else None
     if inbox and inbox.exists() and not os.access(inbox, os.W_OK):
@@ -1038,6 +1074,38 @@ def cmd_doctor(args):
         print("Problems:\n  - " + "\n  - ".join(problems))
         sys.exit(1)
     print("OK. Permissions can only be checked by recording: `meet start test`, talk, `meet status`, `meet stop`.")
+
+
+def cmd_config(args):
+    updates = {}
+    if args.inbox is not None:
+        if not args.inbox.strip():
+            fail("--inbox needs a folder")
+        inbox = Path(os.path.abspath(os.path.expanduser(args.inbox.strip())))
+        if inbox.exists() and not inbox.is_dir():
+            fail(f"Not a folder: {inbox}")
+        updates["MEET_INBOX"] = str(inbox)
+    if args.mic is not None:
+        updates["MEET_MIC"] = args.mic
+    if args.prompt is not None:
+        updates["MEET_PROMPT"] = args.prompt
+    if updates:
+        try:
+            set_config(updates)
+        except (ValueError, OSError) as exc:
+            fail(f"Couldn't update {CONFIG_FILE}: {exc}")
+        for k, v in updates.items():
+            print(f'{k}="{v}"')
+        if "MEET_INBOX" in updates and not Path(updates["MEET_INBOX"]).exists():
+            print("The folder doesn't exist yet; it's created with the first transcript.")
+        return
+    cfg = load_config()
+    if args.get:
+        if args.get not in cfg:
+            fail(f"Unknown key: {args.get}")
+        print(cfg[args.get])
+        return
+    print_config(cfg)
 
 
 def cmd_tag(args):
@@ -1106,6 +1174,11 @@ def main():
     s = sub.add_parser("status", help="am I recording?")
     s.add_argument("--json", action="store_true", help="machine-readable output")
     sub.add_parser("doctor", help="check the setup and list input devices")
+    s = sub.add_parser("config", help="show or change settings (the transcripts folder, mic, prompt)")
+    s.add_argument("--inbox", help="folder where transcripts (.md) are written")
+    s.add_argument("--mic", help='part of an input device name; "" = system default')
+    s.add_argument("--prompt", help="whisper initial prompt, in your meeting language(s)")
+    s.add_argument("--get", metavar="KEY", help="print one setting, e.g. MEET_INBOX")
     s = sub.add_parser("retry", help="re-run transcription for a failed recording")
     s.add_argument("id", nargs="?")
     s.add_argument("--wait", action="store_true")
@@ -1117,7 +1190,7 @@ def main():
         process(Path(args.dir))
     else:
         {"start": cmd_start, "stop": cmd_stop, "status": cmd_status, "retry": cmd_retry,
-         "doctor": cmd_doctor, "tag": cmd_tag}[args.cmd](args)
+         "doctor": cmd_doctor, "config": cmd_config, "tag": cmd_tag}[args.cmd](args)
 
 
 if __name__ == "__main__":

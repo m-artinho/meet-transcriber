@@ -377,6 +377,39 @@ class MarkdownTests(unittest.TestCase):
         self.assertIn('# Say "hi"\n', quoted)
 
 
+class SetConfigTests(unittest.TestCase):
+    def test_new_file_starts_from_the_example_with_no_inbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "conf" / "config"
+            meet.set_config({"MEET_MIC": "C922"}, path)
+            text = path.read_text()
+            self.assertIn('MEET_INBOX=""\n', text)
+            self.assertIn('MEET_MIC="C922"\n', text)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_replaces_active_then_commented_line_and_keeps_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config"
+            path.write_text('# keep me\n# MEET_MIC="old"\nMEET_INBOX="/old"\nMEET_KEEP_AUDIO=1\n')
+            meet.set_config({"MEET_INBOX": "/new/Meet Notes", "MEET_MIC": "C922", "MEET_PROMPT": 'Oi, "pessoal".'}, path)
+            self.assertEqual(path.read_text(), '# keep me\nMEET_MIC="C922"\nMEET_INBOX="/new/Meet Notes"\n'
+                                               'MEET_KEEP_AUDIO=1\nMEET_PROMPT="Oi, "pessoal"."\n')
+            self.assertEqual(list(Path(tmp).glob(".*")), [])
+
+    def test_rejects_newlines_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config"
+            with self.assertRaises(ValueError):
+                meet.set_config({"MEET_PROMPT": "a\nMEET_INBOX=/x"}, path)
+            self.assertFalse(path.exists())
+            target = Path(tmp) / "target"
+            target.write_text("keep")
+            path.symlink_to(target)
+            with self.assertRaises(ValueError):
+                meet.set_config({"MEET_MIC": "x"}, path)
+            self.assertEqual(target.read_text(), "keep")
+
+
 class WriteAtomicTests(unittest.TestCase):
     def test_writes_utf8_and_disambiguates_names(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -146,9 +146,12 @@ final class Model: ObservableObject {
     var isRecording: Bool { recording?.alive == true }
     /// A stopped recording whose transcript is waiting for tags (the step after Stop).
     var awaitingTags: Job? { status?.jobs.first { $0.awaiting_tags == true } }
-    /// Called when a recording starts waiting for tags, so the app can show the tags step.
-    var onTagsNeeded: (() -> Void)?
+    /// No transcripts folder configured yet (first run): the panel asks for one.
+    var needsInbox: Bool { status?.inbox.isEmpty == true }
+    /// Brings up the panel: the tags step after a stop, the folder step on first run.
+    var showPanel: (() -> Void)?
     private var askedForTags: Set<String> = []
+    private var askedForInbox = false
 
     /// Seconds until the transcript is written without tags.
     func tagsDeadline(_ job: Job) -> TimeInterval? {
@@ -197,7 +200,11 @@ final class Model: ObservableObject {
         status = s
         if let job = awaitingTags, !askedForTags.contains(job.id) {
             askedForTags.insert(job.id)
-            onTagsNeeded?()
+            showPanel?()
+        }
+        if needsInbox, !askedForInbox {
+            askedForInbox = true
+            showPanel?()
         }
         guard let r = s.recording, r.alive else {
             recordingID = nil
@@ -267,6 +274,23 @@ final class Model: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let r = CLI.run(["doctor"])
             DispatchQueue.main.async { self.doctor = [r.out, r.err].filter { !$0.isEmpty }.joined(separator: "\n") }
+        }
+    }
+
+    /// Folder picker for where transcripts go; saved with `meet config --inbox`.
+    func chooseInbox() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use this folder"
+        panel.message = "Choose where transcripts (.md) are saved, e.g. a folder in your Obsidian vault."
+        if let inbox = status?.inbox, !inbox.isEmpty { panel.directoryURL = URL(fileURLWithPath: inbox) }
+        NSApp.activate()
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            self.perform("Saving…", ["config", "--inbox=\(url.path)"]) { self.showPanel?() }
         }
     }
 
@@ -363,7 +387,7 @@ struct Panel: View {
             if let job = model.awaitingTags {
                 tagsSection(job)
             } else if model.recording == nil {
-                idleSection
+                if model.needsInbox { inboxSection } else { idleSection }
             }
             if let busy = model.busy {
                 HStack(spacing: 6) { ProgressView().controlSize(.small); Text(busy).foregroundStyle(.secondary) }
@@ -398,6 +422,19 @@ struct Panel: View {
         .onAppear { focus = .name }
         .onReceive(NotificationCenter.default.publisher(for: NSPopover.didShowNotification)) { _ in
             if model.awaitingTags == nil { focus = .name }
+        }
+    }
+
+    private var inboxSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Where should transcripts go?").font(.headline)
+            Text("Pick a folder for the .md files, e.g. one in your Obsidian vault. You can change it later in the ⋯ menu.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Button { model.chooseInbox() } label: {
+                Label("Choose folder…", systemImage: "folder.badge.plus").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.busy != nil)
         }
     }
 
@@ -580,6 +617,7 @@ struct Panel: View {
             Spacer()
             Menu {
                 Button("Check setup…") { model.runDoctor() }
+                Button("Change transcripts folder…") { model.chooseInbox() }
                 Toggle("Open at login", isOn: Binding(get: { model.openAtLogin }, set: { model.openAtLogin = $0 }))
                 Button("Open log") { model.openLog() }
                 Divider()
@@ -680,8 +718,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observer = Model.shared.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.updateButton() }
         }
-        // After a stop from a hotkey/URL (or with the panel closed), bring up the tags step.
-        Model.shared.onTagsNeeded = { [weak self] in
+        // After a stop from a hotkey/URL (or with the panel closed), bring up the tags step;
+        // on first run, the folder step.
+        Model.shared.showPanel = { [weak self] in
             guard let self, !self.popover.isShown else { return }
             self.togglePopover()
         }

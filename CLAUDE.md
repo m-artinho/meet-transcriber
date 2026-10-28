@@ -20,7 +20,7 @@ Don't install anything or download models without the user's OK.
    - Meeting language(s), to write `MEET_PROMPT`: a short punctuated sentence in those languages, e.g. for English + Portuguese `Olá, pessoal. Hi everyone, let's get started. Tudo bem?`. Frequent names/jargon can go in it.
    - Which mic their meeting app uses: `./build.sh && bin/meet-capture --list-inputs` (`*` = default). Empty = follow the system default. With Bluetooth earbuds + a different meeting mic, set `--mic` to that mic.
    - OK to `brew install whisper-cpp` (if missing), download ~1.6 GB of models, symlink `meet` into Homebrew's `bin`, and install the menu bar app into `~/Applications`.
-3. **Install:** `./install.sh --yes --inbox "<inbox>" --prompt "<prompt>" [--mic "<device name part>"]` (`--no-app` skips the menu bar app). Idempotent; with `--inbox/--mic/--prompt` it updates `~/.config/meet/config`. Ends with `meet doctor`; fix anything under "Problems".
+3. **Install:** `./install.sh --yes --inbox "<inbox>" --prompt "<prompt>" [--mic "<device name part>"]` (`--no-app` skips the menu bar app). Idempotent; with `--inbox/--mic/--prompt` it updates `~/.config/meet/config` (via `meet config`). Without `--inbox`, a re-run keeps the configured folder; on a first install it's required with `--yes`, and interactive runs open a Finder folder picker (`osascript choose folder`, typed path as fallback). Ends with `meet doctor`; fix anything under "Problems".
 4. **Permissions + first test (needs the user):** on the first recording macOS asks for Microphone and System Audio Recording for `meet-capture` (System Settings → Privacy & Security → Screen & System Audio Recording → **System Audio Recording Only**). Ask them to play a video and speak; `meet start "Setup test"`, `meet status` after ~10 s (both tracks `ok`), `meet stop --tags "" --wait`, show the file. `system: silent ⚠️` = that permission is missing. No banners = enable "Script Editor" in Notifications. Suggest "Open at login" in the app's ⋯ menu.
 
 ## Architecture
@@ -73,9 +73,10 @@ Runtime locations:
 
 ## CLI
 
-`meet start <name> [--keep-audio]` · `meet stop [--tags a,b | --tags-later] [--keep-audio] [--wait]` · `meet tag [id] --tags a,b` · `meet status [--json]` · `meet retry [id] [--wait]` · `meet doctor` · `meet _process <dir>` (internal).
+`meet start <name> [--keep-audio]` · `meet stop [--tags a,b | --tags-later] [--keep-audio] [--wait]` · `meet tag [id] --tags a,b` · `meet status [--json]` · `meet retry [id] [--wait]` · `meet doctor` · `meet config [--inbox d] [--mic m] [--prompt p] [--get KEY]` · `meet _process <dir>` (internal).
 
 - The name given at start is the title; its slug is `initiative` and the filename: `YYYY-MM-DD_HHMM_<slug>.md`.
+- `meet config --inbox/--mic/--prompt` edits the config file in place (`set_config`: replaces the active line, else a commented one, else appends; a missing file starts from `config.example`, whose `MEET_INBOX` is empty on purpose). The inbox is stored as an absolute path. `--get KEY` prints the effective value (env included); install.sh uses it to decide whether to ask.
 - Tags are only what the user enters (never the slug). Obsidian-safe (`tagify`): accents kept, numeric-only dropped. Frontmatter `tags: [...]` plus a `#tag` line; no line when empty.
 - `meet start` refuses if setup is incomplete (`setup_problems`), kills stray recorders, and waits up to 60 s for the recorder's `ready` (permission prompts).
 - `meet stop` sends SIGTERM, waits ≤10 s, then kills the process group. `--tags-later` makes the worker hold the transcript until `meet tag` (≤10 min after the stop, `TAG_WAIT`), then write it without tags.
@@ -104,7 +105,8 @@ Runtime locations:
 
 - `Model` (singleton) polls `meet status --json` every 2 s (busy) / 5 s (idle), never overlapping. It runs CLI calls with stdout/stderr kept apart, an augmented `PATH` (GUI apps get a minimal one), stdin `/dev/null`. Arguments are argparse-safe: `start -- <name>`, `--tags=<tags>`. The CLI path is `MeetCLIPath` from Info.plist, then the usual install locations.
 - **Menu bar icon:** mic (idle), red dot + timer (recording), orange "!" when quiet, orange tag (waiting for tags), hourglass (transcribing).
-- **Panel flow:** name → Start (Enter never triggers a step; only buttons do); while recording, levels plus Stop recording; then the **Add tags** step (Stop runs `stop --tags-later`; Save/Skip run `meet tag`; `TagField`, an `NSTextField` wrapper, drives suggestions from `known_tags` with ↑/↓/Enter/Tab/Esc); jobs with Retry; Recent; ⋯ menu (Check setup = `meet doctor`, Open at login via `SMAppService`, Open log, Quit).
+- **First run:** when `status --json` has an empty `inbox`, the panel shows a **Choose folder…** step (`NSOpenPanel` → `meet config --inbox=…`) instead of the name field, and opens itself once (`showPanel`). ⋯ → Change transcripts folder reuses the picker.
+- **Panel flow:** name → Start (Enter never triggers a step; only buttons do); while recording, levels plus Stop recording; then the **Add tags** step (Stop runs `stop --tags-later`; Save/Skip run `meet tag`; `TagField`, an `NSTextField` wrapper, drives suggestions from `known_tags` with ↑/↓/Enter/Tab/Esc); jobs with Retry; Recent; ⋯ menu (Check setup = `meet doctor`, Change transcripts folder, Open at login via `SMAppService`, Open log, Quit).
 - **Watchdog:** notification if system audio has been quiet (<0.003 peak) for 15 min (repeats every 30 min), and hourly after 3 h. It never auto-stops.
 - **URLs:** `meetbar://start?name=…`, `meetbar://stop` (opens the tags step), `meetbar://stop?tags=…`. Handy for testing the app's real code path from a shell.
 - **Popover, not `MenuBarExtra`:** the latter leaves ghost space when content height changes. The popover hosts with `sizingOptions = .preferredContentSize`, and the panel uses `.fixedSize(horizontal: false, vertical: true)`.

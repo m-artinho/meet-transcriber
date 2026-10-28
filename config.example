@@ -1,9 +1,10 @@
 # meet config: copy to ~/.config/meet/config (install.sh does this for you).
 # Format: KEY="value". Environment variables with the same name override these.
 
-# Where finished transcripts (.md) are written. Required.
-# Any folder works: an Obsidian vault folder, a notes inbox, a synced drive...
-MEET_INBOX="~/Documents/meeting-transcripts"
+# Where finished transcripts (.md) are written. Required; install.sh or the menu
+# bar app asks for it. Any folder works: an Obsidian vault folder, a notes inbox,
+# a synced drive... e.g. MEET_INBOX="~/Notes/Meetings"
+MEET_INBOX=""
 
 # Mic to record: part of an input device name (e.g. "MacBook Pro Microphone",
 # "C922", "AirPods"). Empty = the Mac's default input. Use the same mic your
