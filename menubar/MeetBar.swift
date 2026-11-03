@@ -717,6 +717,168 @@ struct TagField: NSViewRepresentable {
     }
 }
 
+// MARK: - Recording safeguards
+// Two "don't forget it's recording" reminders on top of the menu bar timer: a thin
+// bar along the bottom of every screen, and a check-in panel after an hour (then
+// every 30 min after the last answer) or when the watchdog finds no meeting audio.
+// Both only read Model state; Stop & save is the panel's Stop recording (`model.stop()`).
+
+/// A panel that never takes focus from the app the user is in (e.g. Teams).
+final class PassivePanel: NSPanel {
+    var focusable = false
+    override var canBecomeKey: Bool { focusable }
+    override var canBecomeMain: Bool { false }
+    override func cancelOperation(_ sender: Any?) {} // Esc does nothing
+}
+
+/// 3 pt bar pinned to the bottom edge of each screen while recording; clicks pass through.
+final class EdgeBars {
+    private var bars: [NSPanel] = []
+    private var color = NSColor.systemRed
+    private var observer: NSObjectProtocol?
+
+    init() {
+        observer = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, !self.bars.isEmpty else { return }
+            self.hide()
+            self.show(self.color)
+        }
+    }
+
+    func show(_ color: NSColor) {
+        self.color = color
+        if bars.isEmpty {
+            bars = NSScreen.screens.map { screen in
+                let f = screen.frame
+                let p = PassivePanel(contentRect: NSRect(x: f.minX, y: f.minY, width: f.width, height: 3),
+                                     styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+                p.level = .statusBar
+                p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+                p.ignoresMouseEvents = true
+                p.isOpaque = false
+                p.hasShadow = false
+                p.hidesOnDeactivate = false
+                p.isExcludedFromWindowsMenu = true
+                p.isReleasedWhenClosed = false
+                p.orderFrontRegardless()
+                return p
+            }
+        }
+        let fill = color.withAlphaComponent(0.85)
+        for p in bars where p.backgroundColor != fill { p.backgroundColor = fill }
+    }
+
+    func hide() {
+        bars.forEach { $0.orderOut(nil) }
+        bars = []
+    }
+}
+
+struct CheckIn: View {
+    @ObservedObject var model: Model
+    let quiet: Bool
+    let keep: () -> Void
+    let stop: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "record.circle.fill").foregroundStyle(.red)
+                Text("Still recording \"\(model.recording?.name ?? "")\"")
+                    .font(.headline).lineLimit(1).truncationMode(.middle)
+            }
+            Text(quiet ? "No meeting audio for 15 min." : "Running for \(hms(model.elapsed))")
+                .monospacedDigit()
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Keep recording", action: keep).buttonStyle(.bordered)
+                Button("Stop & save", action: stop)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(model.busy != nil)
+            }
+        }
+        .padding(16)
+        .frame(width: 280)
+    }
+}
+
+final class Safeguards: NSObject, NSWindowDelegate {
+    static let firstCheckIn: TimeInterval = 3600  // recording time of the first check-in
+    static let checkInRepeat: TimeInterval = 1800 // after each answer
+
+    private let model = Model.shared
+    private let bars = EdgeBars()
+    private var panel: PassivePanel?
+    private var recordingID: String?
+    private var nextCheckIn = Safeguards.firstCheckIn
+    private var wasQuiet = false
+
+    /// Called after every Model change.
+    func update() {
+        // Hide as soon as Stop is pressed in the app, not only once `meet stop` returns.
+        guard model.isRecording, model.busy != "Stopping…", let r = model.recording else {
+            bars.hide()
+            closeCheckIn()
+            recordingID = nil
+            return
+        }
+        if r.id != recordingID {
+            recordingID = r.id
+            nextCheckIn = Safeguards.firstCheckIn
+            wasQuiet = false
+        }
+        bars.show(model.isQuiet ? .systemOrange : .systemRed)
+        if model.isQuiet, !wasQuiet { showCheckIn(quiet: true) }
+        wasQuiet = model.isQuiet
+        if model.elapsed >= nextCheckIn { showCheckIn(quiet: false) }
+    }
+
+    private func showCheckIn(quiet: Bool) {
+        guard panel == nil else { return }
+        let view = NSHostingView(rootView: CheckIn(model: model, quiet: quiet,
+                                                   keep: { [weak self] in self?.keepRecording() },
+                                                   stop: { [weak self] in self?.model.stop(); self?.closeCheckIn() }))
+        let p = PassivePanel(contentRect: NSRect(origin: .zero, size: view.fittingSize),
+                             styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
+                             backing: .buffered, defer: false)
+        p.focusable = true
+        p.becomesKeyOnlyIfNeeded = true // buttons don't need keys: keyboard input stays with the frontmost app
+        p.contentView = view
+        p.title = "Meet Transcriber"
+        p.level = .floating
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.hidesOnDeactivate = false
+        p.isReleasedWhenClosed = false
+        p.delegate = self
+        if let vf = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame {
+            p.setFrameTopLeftPoint(NSPoint(x: vf.maxX - p.frame.width - 16, y: vf.maxY - 16))
+        }
+        p.orderFrontRegardless()
+        panel = p
+    }
+
+    private func keepRecording() {
+        nextCheckIn = model.elapsed + Safeguards.checkInRepeat
+        closeCheckIn()
+    }
+
+    /// The close button = Keep recording.
+    func windowWillClose(_ notification: Notification) {
+        guard panel != nil else { return }
+        nextCheckIn = model.elapsed + Safeguards.checkInRepeat
+        panel = nil
+    }
+
+    private func closeCheckIn() {
+        guard let p = panel else { return }
+        panel = nil
+        p.orderOut(nil)
+    }
+}
+
 // MARK: - App
 // A plain NSStatusItem + NSPopover instead of SwiftUI's MenuBarExtra: the
 // MenuBarExtra window doesn't resize or re-anchor when the content's height
@@ -727,6 +889,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var item: NSStatusItem!
     private let popover = NSPopover()
     private var observer: AnyCancellable?
+    private let safeguards = Safeguards()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -740,7 +903,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // objectWillChange fires before the change lands; read the new state on the next turn.
         observer = Model.shared.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.updateButton() }
+            DispatchQueue.main.async { self?.updateButton(); self?.safeguards.update() }
         }
         // After a stop from a hotkey/URL (or with the panel closed), bring up the tags step;
         // on first run, the folder step.

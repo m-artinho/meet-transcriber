@@ -119,6 +119,7 @@ Runtime locations:
   - Tags step: suggestions are a plain list under the field (no box; highlighted row `Color.accentColor.opacity(0.2)`, 4 pt corners). One caption line counts down to the auto-save: `Model.tagsDeadline` = 600 s after `stopped_at`, the same as `TAG_WAIT`.
   - Job rows: `Transcribing "<name>"…` with the time since the stop (`Model.sinceStop`); failed or interrupted jobs get Retry.
 - **Watchdog:** notification if system audio has been quiet (<0.003 peak) for 15 min (repeats every 30 min), and hourly after 3 h. It never auto-stops.
+- **Safeguards** (`Safeguards`, driven from `AppDelegate`'s model sink): `EdgeBars`, a 3 pt click-through panel at the bottom of each `screen.frame` (`.statusBar` level, all Spaces; red, orange when `isQuiet`), hidden as soon as Stop is pressed or the recording isn't alive. A check-in panel (`PassivePanel`, non-activating, `becomesKeyOnlyIfNeeded`, Esc ignored) at `firstCheckIn` (1 h) of recording time, then `checkInRepeat` (30 min) after each answer, and right when `isQuiet` turns on. Keep recording / close = snooze; Stop & save = `model.stop()`. For testing, set both constants to 10 and revert.
 - **URLs:** `meetbar://start?name=…`, `meetbar://stop` (opens the tags step), `meetbar://stop?tags=…`. Handy for testing the app's real code path from a shell.
 - **Popover, not `MenuBarExtra`:** the latter leaves ghost space when content height changes. The popover hosts with `sizingOptions = .preferredContentSize`, and the panel uses `.fixedSize(horizontal: false, vertical: true)`.
 

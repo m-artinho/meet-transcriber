@@ -83,6 +83,8 @@ Click the mic icon in the menu bar:
 
 **So a recording doesn't run all night:** if there's been no meeting audio for 15 minutes, the icon turns orange and you get a notification (repeated every 30 minutes). After 3 hours you also get an hourly reminder. Nothing is stopped automatically.
 
+While recording, a thin red bar runs along the bottom of every screen (orange when there's no meeting audio). After an hour, and then every 30 minutes, or as soon as there's no meeting audio, a small panel in the top-right corner asks whether to **Keep recording** or **Stop & save** (which goes on to the Add tags step). It doesn't take focus from your meeting app, and closing it counts as Keep recording.
+
 The app is a front end for the `meet` command: it runs `meet start`, `meet stop`, `meet status --json` and so on, so the app and the terminal always agree. You can start in one and stop in the other.
 
 **Hotkeys, Raycast, Shortcuts:** the app handles `meetbar://` links:
