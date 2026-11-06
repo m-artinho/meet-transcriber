@@ -81,9 +81,17 @@ Click the mic icon in the menu bar:
 - **Always:** your last transcripts (click to open) and **Transcripts**, which opens the inbox folder.
 - **⋯ menu:** Check setup (`meet doctor`), Change transcripts folder, Open at login, Open log, Quit. Quitting the app doesn't stop a recording.
 
+**So you don't forget to record:** when Teams, Zoom, FaceTime or a browser (Chrome, Safari, Edge, Arc, Firefox) has been using the mic for 5 seconds and nothing is recording, a small panel in the top-right corner says "*App* is using your mic", with an optional name field, **Record** and **Not now**. It doesn't take focus from your meeting app.
+- **Record** starts a recording exactly like **Start recording** in the panel.
+- **Not now** means that app isn't suggested again until it has been off the mic for 2 minutes, so one call never asks twice. The same goes for an app still using the mic when you stop a recording.
+- The panel closes on its own when the app stops using the mic or a recording starts. If a call is already going when the app opens, it asks right away.
+- It only looks at which apps are using a mic, never at audio, and needs no extra permission. A browser counts whenever it uses the mic, so a voice message in a web app can trigger it too.
+
 **So a recording doesn't run all night:** if there's been no meeting audio for 15 minutes, the icon turns orange and you get a notification (repeated every 30 minutes). After 3 hours you also get an hourly reminder. Nothing is stopped automatically.
 
 While recording, a thin red bar runs along the bottom of every screen (orange when there's no meeting audio). After an hour, and then every 30 minutes, or as soon as there's no meeting audio, a small panel in the top-right corner asks whether to **Keep recording** or **Stop & save** (which goes on to the Add tags step). It doesn't take focus from your meeting app, and closing it counts as Keep recording.
+
+**So you don't forget to stop:** while recording, if Teams, Zoom, FaceTime or a browser was using the mic and lets go of it (you left the call), a panel asks "*App* call ended?" within a few seconds, with **Keep recording** and **Stop & save**. It only asks, it never stops on its own. Keep recording means it asks again only if that app picks up the mic and lets go again. After **Stop & save**, an app already on the mic for your next call is suggested for recording as usual. Recordings where no meeting app used the mic (in person) never ask. A browser with another tab still using the mic counts as still in the call.
 
 The app is a front end for the `meet` command: it runs `meet start`, `meet stop`, `meet status --json` and so on, so the app and the terminal always agree. You can start in one and stop in the other.
 

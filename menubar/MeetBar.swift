@@ -7,10 +7,12 @@
 // (with a name), watch levels, stop (with tags), retry failed transcriptions and
 // open recent transcripts. Every action runs the `meet` CLI, so the app and the
 // terminal always agree. Warns when a recording seems to have outlived its
-// meeting (no meeting audio for a while, or very long).
+// meeting (no meeting audio for a while, or very long), and suggests recording
+// when a meeting app (Teams, Zoom, FaceTime, a browser) starts using the mic.
 
 import AppKit
 import Combine
+import CoreAudio
 import ServiceManagement
 import SwiftUI
 
@@ -234,7 +236,7 @@ final class Model: ObservableObject {
         }
     }
 
-    private func perform(_ label: String, _ args: [String], onSuccess: (() -> Void)? = nil) {
+    private func perform(_ label: String, _ args: [String], onSuccess: (() -> Void)? = nil, onFailure: (() -> Void)? = nil) {
         busy = label
         message = nil
         DispatchQueue.global(qos: .userInitiated).async {
@@ -243,13 +245,22 @@ final class Model: ObservableObject {
                 self.busy = nil
                 if r.code == 0 { onSuccess?() } else {
                     self.message = r.err.isEmpty ? (r.out.isEmpty ? "meet \(args[0]) failed (\(r.code))" : r.out) : r.err
+                    onFailure?()
                 }
                 self.refresh()
             }
         }
     }
 
-    func start(_ name: String, done: @escaping () -> Void) { perform("Starting…", ["start", "--", name], onSuccess: done) }
+    func start(_ name: String, done: @escaping () -> Void, failed: (() -> Void)? = nil) {
+        perform("Starting…", ["start", "--", name], onSuccess: done, onFailure: failed)
+    }
+    /// The panel's Start recording (and the meeting suggestion's Record): the typed name,
+    /// or "Meeting" when it's empty (the filename already has the date and time).
+    func start(typed name: String, done: @escaping () -> Void = {}, failed: (() -> Void)? = nil) {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        start(n.isEmpty ? "Meeting" : n, done: done, failed: failed)
+    }
     /// Stop now; tags are asked for in the next step (the transcript waits for them).
     func stop(done: @escaping () -> Void = {}) { perform("Stopping…", ["stop", "--tags-later"], onSuccess: done) }
     func stop(tags: String) { perform("Stopping…", ["stop", "--tags=\(tags)"]) }
@@ -293,7 +304,7 @@ final class Model: ObservableObject {
         NSApp.activate()
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
-            self.perform("Saving…", ["config", "--inbox=\(url.path)"]) { self.showPanel?() }
+            self.perform("Saving…", ["config", "--inbox=\(url.path)"], onSuccess: { self.showPanel?() })
         }
     }
 
@@ -459,11 +470,9 @@ struct Panel: View {
         }
     }
 
-    /// Starts with the typed name, or "Meeting" when it's empty (the filename already has the date and time).
     private func startIfValid() {
         guard model.busy == nil else { return }
-        let n = name.trimmingCharacters(in: .whitespaces)
-        model.start(n.isEmpty ? "Meeting" : n) { name = "" }
+        model.start(typed: name, done: { name = "" })
     }
 
     private func recordingSection(_ r: Recording) -> some View {
@@ -718,10 +727,11 @@ struct TagField: NSViewRepresentable {
 }
 
 // MARK: - Recording safeguards
-// Two "don't forget it's recording" reminders on top of the menu bar timer: a thin
-// bar along the bottom of every screen, and a check-in panel after an hour (then
-// every 30 min after the last answer) or when the watchdog finds no meeting audio.
-// Both only read Model state; Stop & save is the panel's Stop recording (`model.stop()`).
+// "Don't forget it's recording" reminders on top of the menu bar timer: a thin bar
+// along the bottom of every screen; a check-in panel after an hour (then every 30 min
+// after the last answer) or when the watchdog finds no meeting audio; and a "call
+// ended?" banner when a meeting app that was on the mic lets go of it.
+// Stop & save is the panel's Stop recording (`model.stop()`).
 
 /// A panel that never takes focus from the app the user is in (e.g. Teams).
 final class PassivePanel: NSPanel {
@@ -729,6 +739,40 @@ final class PassivePanel: NSPanel {
     override var canBecomeKey: Bool { focusable }
     override var canBecomeMain: Bool { false }
     override func cancelOperation(_ sender: Any?) {} // Esc does nothing
+}
+
+/// The check-in and meeting-suggestion window: a small panel in the top-right corner of
+/// the main screen, on every Space, that doesn't activate the app. Buttons work without
+/// it becoming key, so keystrokes stay with the meeting app; a text field makes it key
+/// only when clicked. `borderless`: no title bar, the view draws its own rounded card
+/// (the suggestion, styled like a notification banner).
+func showFloatingPanel(_ view: NSView, delegate: NSWindowDelegate, borderless: Bool = false) -> PassivePanel {
+    let p = PassivePanel(contentRect: NSRect(origin: .zero, size: view.fittingSize),
+                         styleMask: borderless ? [.borderless, .nonactivatingPanel]
+                                               : [.titled, .closable, .utilityWindow, .nonactivatingPanel],
+                         backing: .buffered, defer: false)
+    p.focusable = true
+    p.becomesKeyOnlyIfNeeded = true
+    p.contentView = view
+    if borderless {
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+    } else {
+        p.title = "Meet Transcriber"
+    }
+    p.level = .floating
+    p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    p.hidesOnDeactivate = false
+    p.isReleasedWhenClosed = false
+    p.delegate = delegate
+    let inset: CGFloat = borderless ? 12 : 16
+    if let vf = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame {
+        p.setFrameTopLeftPoint(NSPoint(x: vf.maxX - p.frame.width - inset, y: vf.maxY - inset))
+    }
+    p.orderFrontRegardless()
+    if borderless { p.invalidateShadow() } // shadow follows the rounded card, not the square window
+    return p
 }
 
 /// 3 pt bar pinned to the bottom edge of each screen while recording; clicks pass through.
@@ -775,6 +819,64 @@ final class EdgeBars {
     }
 }
 
+/// The meeting banners' look (shown with `showFloatingPanel(borderless: true)`): a rounded
+/// material card like a notification, an icon with caption, headline and subtitle, then `content`.
+struct BannerCard<Content: View>: View {
+    let symbol: String
+    let tint: Color
+    let headline: String
+    let subtitle: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.title3)
+                    .foregroundStyle(tint)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(tint.opacity(0.15)))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Meet Transcriber").font(.caption).foregroundStyle(.secondary)
+                    Text(headline).font(.headline).lineLimit(1).truncationMode(.middle)
+                    Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+                        .monospacedDigit().lineLimit(1).truncationMode(.middle)
+                }
+            }
+            content
+        }
+        .controlSize(.regular)
+        .environment(\.controlActiveState, .key) // the panel never becomes key; keep the red button red, not inactive gray
+        .padding(14)
+        .frame(width: 320)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1))
+    }
+}
+
+/// While recording, a meeting app that was on the mic has let go of it: the call is probably over.
+struct CallEnded: View {
+    @ObservedObject var model: Model
+    let app: String
+    let keep: () -> Void
+    let stop: () -> Void
+
+    var body: some View {
+        BannerCard(symbol: "phone.down.fill", tint: .red, headline: "\(app) call ended?",
+                   subtitle: "Still recording \"\(model.recording?.name ?? "")\" · \(hms(model.elapsed))") {
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Keep recording", action: keep).buttonStyle(.bordered)
+                Button("Stop & save", action: stop)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(model.busy != nil)
+            }
+        }
+    }
+}
+
 struct CheckIn: View {
     @ObservedObject var model: Model
     let quiet: Bool
@@ -816,6 +918,18 @@ final class Safeguards: NSObject, NSWindowDelegate {
     private var nextCheckIn = Safeguards.firstCheckIn
     private var wasQuiet = false
 
+    // Call ended: every `micCheck` the mic is read (on the Model's 1 s tick, no timer of its
+    // own). A meeting app seen on the mic during this recording that's gone is re-read after
+    // `micConfirm` (rides out device switches), then the CallEnded banner asks to save.
+    static let micCheck: TimeInterval = 5
+    static let micConfirm: TimeInterval = 2
+    private var callApps: [String: String] = [:] // bundle ID → name, on the mic during this recording
+    private var lastMicCheck = Date.distantPast
+    private var leaving = false                  // a call app was gone at the last read; confirming
+    private var askedCallEnded = false           // the open panel is CallEnded
+    /// Stop & save from CallEnded: the next meeting may already be on the mic, so keep suggesting it.
+    var onCallEndedStop: (() -> Void)?
+
     /// Called after every Model change.
     func update() {
         // Hide as soon as Stop is pressed in the app, not only once `meet stop` returns.
@@ -829,11 +943,44 @@ final class Safeguards: NSObject, NSWindowDelegate {
             recordingID = r.id
             nextCheckIn = Safeguards.firstCheckIn
             wasQuiet = false
+            callApps = [:]
+            lastMicCheck = .distantPast
+            leaving = false
         }
         bars.show(model.isQuiet ? .systemOrange : .systemRed)
         if model.isQuiet, !wasQuiet { showCheckIn(quiet: true) }
         wasQuiet = model.isQuiet
         if model.elapsed >= nextCheckIn { showCheckIn(quiet: false) }
+        checkCall()
+    }
+
+    private func checkCall() {
+        let now = Date()
+        guard now.timeIntervalSince(lastMicCheck) >= (leaving ? Self.micConfirm : Self.micCheck) else { return }
+        lastMicCheck = now
+        let onMic = MeetingDetector.micUse().apps
+        callApps.merge(onMic) { a, _ in a }
+        let gone = callApps.keys.filter { onMic[$0] == nil }.sorted()
+        guard let app = gone.first.flatMap({ callApps[$0] }) else { leaving = false; return }
+        if !leaving { leaving = true; return } // read again shortly before asking
+        leaving = false
+        gone.forEach { callApps[$0] = nil }    // asked once; asks again only if it's back on the mic and leaves
+        showCallEnded(app: app)
+    }
+
+    /// Takes over an open check-in (same choice, better reason); one CallEnded at a time.
+    private func showCallEnded(app: String) {
+        guard !askedCallEnded else { return }
+        closeCheckIn()
+        let view = NSHostingView(rootView: CallEnded(model: model, app: app,
+                                                     keep: { [weak self] in self?.keepRecording() },
+                                                     stop: { [weak self] in
+                                                         self?.onCallEndedStop?()
+                                                         self?.model.stop()
+                                                         self?.closeCheckIn()
+                                                     }))
+        panel = showFloatingPanel(view, delegate: self, borderless: true)
+        askedCallEnded = true
     }
 
     private func showCheckIn(quiet: Bool) {
@@ -841,23 +988,7 @@ final class Safeguards: NSObject, NSWindowDelegate {
         let view = NSHostingView(rootView: CheckIn(model: model, quiet: quiet,
                                                    keep: { [weak self] in self?.keepRecording() },
                                                    stop: { [weak self] in self?.model.stop(); self?.closeCheckIn() }))
-        let p = PassivePanel(contentRect: NSRect(origin: .zero, size: view.fittingSize),
-                             styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
-                             backing: .buffered, defer: false)
-        p.focusable = true
-        p.becomesKeyOnlyIfNeeded = true // buttons don't need keys: keyboard input stays with the frontmost app
-        p.contentView = view
-        p.title = "Meet Transcriber"
-        p.level = .floating
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        p.hidesOnDeactivate = false
-        p.isReleasedWhenClosed = false
-        p.delegate = self
-        if let vf = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame {
-            p.setFrameTopLeftPoint(NSPoint(x: vf.maxX - p.frame.width - 16, y: vf.maxY - 16))
-        }
-        p.orderFrontRegardless()
-        panel = p
+        panel = showFloatingPanel(view, delegate: self)
     }
 
     private func keepRecording() {
@@ -873,9 +1004,269 @@ final class Safeguards: NSObject, NSWindowDelegate {
     }
 
     private func closeCheckIn() {
+        askedCallEnded = false
         guard let p = panel else { return }
         panel = nil
         p.orderOut(nil)
+    }
+}
+
+// MARK: - Meeting detection
+// Suggests recording when a meeting app starts using the mic while nothing is being
+// recorded. Core Audio lists every process doing audio I/O (macOS 14.2+), with its
+// bundle ID and whether it's using an input. Browsers and Teams do their audio in
+// helper processes (Chrome's audio service, WebKit's GPU process), so each one is
+// traced to the app it works for (its "responsible" process). Reads no audio and
+// needs no permission.
+//
+// Event-driven: the process list and every device's "running somewhere" state have
+// listeners. Core Audio doesn't notify when a process starts using the mic on its own,
+// so while any app has the mic (and nothing is recording) the list is re-read every
+// 2 s. That times the 5 s debounce and catches a meeting app joining a mic another
+// app already had open. With the mic idle, nothing runs.
+
+struct MeetingSuggestion: View {
+    @ObservedObject var model: Model
+    let app: String
+    let record: (String) -> Void
+    let notNow: () -> Void
+    @State private var name = ""
+
+    var body: some View {
+        BannerCard(symbol: "mic.fill", tint: .orange, headline: "\(app) is using your mic",
+                   subtitle: "Looks like a call. Record it?") {
+            TextField("Meeting name (optional)", text: $name) // no onSubmit: Enter does nothing
+                .textFieldStyle(.roundedBorder)
+                .padding(.leading, 38) // lines up with the headline (icon 28 + spacing 10)
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Not now", action: notNow).buttonStyle(.bordered)
+                Button("Record") { record(name) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(model.busy != nil)
+            }
+        }
+    }
+}
+
+final class MeetingDetector: NSObject, NSWindowDelegate {
+    /// Meeting apps, by bundle ID (their helper processes resolve to these).
+    static let apps: [String: String] = [
+        "com.microsoft.teams2": "Microsoft Teams",
+        "com.microsoft.teams": "Microsoft Teams", // classic
+        "us.zoom.xos": "Zoom",
+        "com.apple.FaceTime": "FaceTime",
+        "com.google.Chrome": "Google Chrome",
+        "com.apple.Safari": "Safari",
+        "com.microsoft.edgemac": "Microsoft Edge",
+        "company.thebrowser.Browser": "Arc",
+        "org.mozilla.firefox": "Firefox",
+    ]
+    static let ours: Set<String> = ["local.meet.capture", "local.meet.bar"] // the recorder, this app
+    static let debounce: TimeInterval = 5   // on the mic this long before suggesting (skips dictation, blips)
+    static let quietGap: TimeInterval = 120 // after Not now: off the mic this long before asking again
+    static let recheck: TimeInterval = 2
+
+    private let model = Model.shared
+    private let queue = DispatchQueue(label: "local.meet.bar.mic-watch") // Core Audio listeners
+    private var watchedDevices = Set<AudioObjectID>()                   // only touched on `queue`
+    private var since: [String: Date] = [:]    // app → on the mic continuously since
+    private var offSince: [String: Date] = [:] // app → left the mic at
+    private var snoozed = Set<String>()        // answered (or recorded): not again until quietGap off the mic
+    private var timer: Timer?
+    private var panel: PassivePanel?
+    private var panelApp: String?
+    private var ready = false                  // the first `meet status` arrived
+    private var wasRecording = false
+    private var stoppedAfterCall = false       // stopped from the CallEnded banner
+
+    /// The recording was stopped because its call ended: the apps on the mic now are the next
+    /// meeting, not the one just recorded, so they're suggested as usual.
+    func callEndedStop() { stoppedAfterCall = true }
+
+    func start() {
+        queue.async {
+            var list = Self.address(kAudioHardwarePropertyProcessObjectList)
+            AudioObjectAddPropertyListenerBlock(Self.system, &list, self.queue) { [weak self] _, _ in self?.changed() }
+            var devices = Self.address(kAudioHardwarePropertyDevices)
+            AudioObjectAddPropertyListenerBlock(Self.system, &devices, self.queue) { [weak self] _, _ in
+                self?.watchDevices()
+                self?.changed()
+            }
+            self.watchDevices()
+        }
+    }
+
+    /// On `queue`: a mic starting or stopping flips its device's "running somewhere".
+    private func watchDevices() {
+        for device in Self.objects(kAudioHardwarePropertyDevices) where !watchedDevices.contains(device) {
+            watchedDevices.insert(device)
+            var a = Self.address(kAudioDevicePropertyDeviceIsRunningSomewhere)
+            AudioObjectAddPropertyListenerBlock(device, &a, queue) { [weak self] _, _ in self?.changed() }
+        }
+    }
+
+    private func changed() { DispatchQueue.main.async { [weak self] in self?.scan() } }
+
+    /// Called after every Model change. Reads Core Audio only when a recording starts or ends.
+    func update() {
+        guard model.status != nil else { return }
+        let first = !ready
+        ready = true
+        if model.recording != nil || model.busy == "Starting…" {
+            if !wasRecording {
+                wasRecording = true
+                stoppedAfterCall = false
+                closePanel()
+                stopTimer()
+                since = [:]
+            }
+            return
+        }
+        if wasRecording {
+            // Apps still on the mic were in the meeting just recorded: don't ask about them again.
+            wasRecording = false
+            if !stoppedAfterCall {
+                for app in Self.micUse().apps.keys { snoozed.insert(app); offSince[app] = nil }
+            }
+            stoppedAfterCall = false
+            scan()
+        } else if first {
+            scan(atLaunch: true) // a call already going when the app opens: suggest right away
+        }
+    }
+
+    private func scan(atLaunch: Bool = false) {
+        guard ready, !wasRecording, !model.needsInbox else { stopTimer(); return }
+        let (onMic, anyInput) = Self.micUse()
+        let now = Date()
+        for app in Array(since.keys) where onMic[app] == nil {
+            since[app] = nil
+            offSince[app] = now
+        }
+        for app in onMic.keys where since[app] == nil {
+            if snoozed.contains(app), let off = offSince[app], now.timeIntervalSince(off) >= Self.quietGap {
+                snoozed.remove(app)
+            }
+            since[app] = atLaunch ? .distantPast : now
+        }
+        if let app = panelApp, onMic[app] == nil { closePanel() } // it left the mic: the call is over
+        if panel == nil, let hit = onMic.sorted(by: { $0.key < $1.key }).first(where: {
+            !snoozed.contains($0.key) && now.timeIntervalSince(since[$0.key] ?? now) >= Self.debounce
+        }) {
+            show(app: hit.key, name: hit.value)
+        }
+        if anyInput { startTimer() } else { stopTimer() }
+    }
+
+    private func startTimer() {
+        guard timer == nil else { return }
+        let t = Timer(timeInterval: Self.recheck, repeats: true) { [weak self] _ in self?.scan() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func show(app: String, name: String) {
+        let view = NSHostingView(rootView: MeetingSuggestion(model: model, app: name,
+                                                             record: { [weak self] in self?.record($0) },
+                                                             notNow: { [weak self] in self?.snooze() }))
+        panelApp = app
+        panel = showFloatingPanel(view, delegate: self, borderless: true)
+    }
+
+    /// The panel's Start recording path; a failed start opens the panel, where the error shows.
+    private func record(_ name: String) {
+        snooze()
+        model.start(typed: name, failed: { [weak self] in self?.model.showPanel?() })
+    }
+
+    /// Not now: closes, and this app isn't suggested again until it's been off the mic for quietGap.
+    private func snooze() {
+        if let app = panelApp { snoozed.insert(app) }
+        closePanel()
+    }
+
+    /// The close button = Not now.
+    func windowWillClose(_ notification: Notification) {
+        guard panel != nil else { return }
+        if let app = panelApp { snoozed.insert(app) }
+        panel = nil
+        panelApp = nil
+    }
+
+    private func closePanel() {
+        guard let p = panel else { return }
+        panel = nil
+        panelApp = nil
+        p.orderOut(nil)
+    }
+
+    // Core Audio reads
+
+    private static let system = AudioObjectID(kAudioObjectSystemObject)
+
+    private static func address(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                                   mElement: kAudioObjectPropertyElementMain)
+    }
+
+    private static func objects(_ selector: AudioObjectPropertySelector) -> [AudioObjectID] {
+        var a = address(selector)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(system, &a, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(system, &a, 0, nil, &size, &ids) == noErr else { return [] }
+        return Array(ids.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
+    }
+
+    private static func value<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ initial: T) -> T? {
+        var a = address(selector)
+        var v = initial
+        var size = UInt32(MemoryLayout<T>.size)
+        let status = withUnsafeMutablePointer(to: &v) { AudioObjectGetPropertyData(object, &a, 0, nil, &size, $0) }
+        return status == noErr ? v : nil
+    }
+
+    private static func bundleID(_ object: AudioObjectID) -> String {
+        guard let s = value(object, kAudioProcessPropertyBundleID, Unmanaged<CFString>?.none) ?? nil else { return "" }
+        return s.takeRetainedValue() as String // Core Audio hands over a +1 reference
+    }
+
+    /// The app a helper process works for (a libsystem call without a public header).
+    private static let responsible: (@convention(c) (pid_t) -> pid_t)? = {
+        guard let sym = dlsym(dlopen(nil, RTLD_NOW), "responsibility_get_pid_responsible_for_pid") else { return nil }
+        return unsafeBitCast(sym, to: (@convention(c) (pid_t) -> pid_t).self)
+    }()
+
+    /// Meeting apps using a mic right now (bundle ID → name), and whether any process is.
+    static func micUse() -> (apps: [String: String], any: Bool) {
+        var found: [String: String] = [:]
+        var any = false
+        for object in objects(kAudioHardwarePropertyProcessObjectList)
+        where (value(object, kAudioProcessPropertyIsRunningInput, UInt32(0)) ?? 0) != 0 {
+            guard let pid = value(object, kAudioProcessPropertyPID, pid_t(-1)), pid > 0, pid != getpid() else { continue }
+            any = true
+            let own = bundleID(object)
+            var ids = [own]
+            if let r = responsible?(pid), r > 0, let b = NSRunningApplication(processIdentifier: r)?.bundleIdentifier {
+                ids.insert(b, at: 0)
+            }
+            if let helper = own.range(of: ".helper") { ids.append(String(own[..<helper.lowerBound])) } // fallback
+            // FaceTime calls run their audio in the avconferenced daemon.
+            if own == "com.apple.avconferenced",
+               !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.FaceTime").isEmpty {
+                ids.append("com.apple.FaceTime")
+            }
+            if ids.contains(where: ours.contains) { continue }
+            if let app = ids.first(where: { apps[$0] != nil }) { found[app] = apps[app] }
+        }
+        return (found, any)
     }
 }
 
@@ -890,6 +1281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var observer: AnyCancellable?
     private let safeguards = Safeguards()
+    private let detector = MeetingDetector()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -903,8 +1295,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // objectWillChange fires before the change lands; read the new state on the next turn.
         observer = Model.shared.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.updateButton(); self?.safeguards.update() }
+            DispatchQueue.main.async { self?.updateButton(); self?.safeguards.update(); self?.detector.update() }
         }
+        safeguards.onCallEndedStop = { [weak self] in self?.detector.callEndedStop() }
+        detector.start()
         // After a stop from a hotkey/URL (or with the panel closed), bring up the tags step;
         // on first run, the folder step.
         Model.shared.showPanel = { [weak self] in
