@@ -1312,6 +1312,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         urls.forEach { Model.shared.handle($0) }
     }
 
+    /// Opening the app again (Spotlight, Finder, `open`) while it runs shows the panel,
+    /// so it can be found even when the menu bar icon is hidden behind the notch.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !popover.isShown { togglePopover() }
+        return false
+    }
+
     @objc private func togglePopover() {
         guard let button = item.button else { return }
         if popover.isShown {

@@ -41,6 +41,25 @@ ask() { # question -> 0 for yes
   read -r -p "$1 [y/N] " a; [[ "$a" =~ ^[Yy] ]]
 }
 die() { echo "error: $*" >&2; exit 1; }
+# Any failure: say that a re-run is safe (finished steps are skipped).
+on_exit() {
+  [ "$1" -eq 0 ] || printf '\nSetup did not finish. Fix the problem above, then run ./install.sh again: steps already done are skipped.\n' >&2
+}
+trap 'on_exit $?' EXIT
+
+LOGIN_PATH="$PATH" # before we add Homebrew below; used to tell whether new shells will find `meet`
+# Homebrew is often installed but not on PATH yet (its installer prints the
+# shell setup lines as "Next steps", and they're easy to miss).
+find_brew() {
+  command -v brew 2>/dev/null && return
+  local b; for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -x "$b" ] && echo "$b" && return; done
+  return 1
+}
+BREW=$(find_brew || true)
+[ -n "$BREW" ] && eval "$("$BREW" shellenv)"
+
+# A ZIP download or a copy can lose the executable bits.
+chmod +x meet build.sh install.sh 2>/dev/null || true
 
 echo "==> Checking prerequisites"
 ver=$(sw_vers -productVersion)
@@ -49,16 +68,53 @@ if [ "$major" -lt 14 ] || { [ "$major" -eq 14 ] && [ "${minor:-0}" -lt 2 ]; }; t
   die "macOS $ver is too old: Core Audio process taps need macOS 14.2 or later"
 fi
 [ "$(uname -m)" = arm64 ] || echo "warning: Intel Mac detected; it works, but transcription will be much slower"
-command -v swiftc >/dev/null || die "swiftc not found. Install the Xcode Command Line Tools: xcode-select --install"
-echo "macOS $ver, $(uname -m), $(swiftc --version 2>&1 | head -1)"
+# /usr/bin/swiftc exists even without the Command Line Tools (it's a stub that
+# opens the installer), so `command -v swiftc` proves nothing.
+if ! xcode-select -p >/dev/null 2>&1 || ! xcrun --find swiftc >/dev/null 2>&1; then
+  xcode-select --install >/dev/null 2>&1 || true
+  die "the Xcode Command Line Tools (Apple's free compiler, needed to build the app) aren't installed.
+A window should have opened to install them: click Install, wait until it says it's done (it can take a while), then run ./install.sh again.
+No window? Run: xcode-select --install"
+fi
+if ! swift_ver=$(swiftc --version 2>&1); then
+  case "$swift_ver" in
+    *license*) die "Xcode's license hasn't been accepted yet. Run: sudo xcodebuild -license accept   (or open Xcode once), then run ./install.sh again" ;;
+    *) die "swiftc doesn't work:
+$swift_ver
+Reinstalling the Command Line Tools usually fixes this: sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install" ;;
+  esac
+fi
+echo "macOS $ver, $(uname -m), $(head -1 <<<"$swift_ver")"
+
+# The app and the `meet` command run from this folder, so it has to stay put.
+case "$ROOT" in
+  "$HOME/Downloads"*|"$HOME/Desktop"*|"$HOME/Documents"*|*/.Trash/*|*/AppTranslocation/*|/private/var/folders/*|/Volumes/*)
+    echo "warning: meet runs from this folder ($ROOT), so it has to stay here after setup."
+    echo "  Downloads, Desktop and Documents get cleaned up or moved, and macOS asks for extra permissions there."
+    echo "  A better place is your home folder:  mv \"$ROOT\" ~/meet-transcriber && ~/meet-transcriber/install.sh"
+    if ! ask "Install from here anyway?"; then trap - EXIT; exit 0; fi
+    ;;
+esac
 
 echo "==> Building meet-capture and Meet Transcriber.app"
-./build.sh
+./build.sh || die "the build failed (see above).
+If the error mentions the SDK, the compiler or 'module', the Command Line Tools are probably out of date for this macOS.
+Update them in System Settings > General > Software Update, or reinstall: sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install"
 
 echo "==> whisper.cpp"
 WHISPER=$(command -v whisper-cli || true)
 if [ -z "$WHISPER" ]; then
-  command -v brew >/dev/null || die "whisper-cli not found and Homebrew is missing. Install Homebrew (https://brew.sh) or whisper.cpp yourself, then re-run."
+  if [ -z "$BREW" ]; then
+    echo "whisper.cpp (the transcription engine) is installed with Homebrew, which isn't on this Mac yet."
+    # Homebrew's installer asks for the Mac password itself, so --yes can't do it unattended.
+    if [ "$YES" = 0 ] && ask "Install Homebrew now (from https://brew.sh; it asks for your Mac password)?"; then
+      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      BREW=$(find_brew) || die "Homebrew didn't install; see the messages above"
+      eval "$("$BREW" shellenv)"
+    else
+      die "install Homebrew first (https://brew.sh: paste the command shown there into Terminal), then run ./install.sh again"
+    fi
+  fi
   if ask "whisper-cli not found. Run 'brew install whisper-cpp'?"; then brew install whisper-cpp; else echo "Skipped; meet won't transcribe until whisper-cli is installed."; fi
 else
   echo "found $WHISPER"
@@ -129,7 +185,7 @@ fi
 
 if [ "$LINK" = 1 ]; then
   if [ -z "$LINK_DIR" ]; then
-    if command -v brew >/dev/null && [ -w "$(brew --prefix)/bin" ]; then LINK_DIR="$(brew --prefix)/bin"; else LINK_DIR="$HOME/.local/bin"; fi
+    if [ -n "$BREW" ] && [ -w "$("$BREW" --prefix)/bin" ]; then LINK_DIR="$("$BREW" --prefix)/bin"; else LINK_DIR="$HOME/.local/bin"; fi
   fi
   echo "==> Linking $LINK_DIR/meet -> $ROOT/meet"
   if [ "$(readlink "$LINK_DIR/meet" 2>/dev/null)" = "$ROOT/meet" ]; then
@@ -137,8 +193,27 @@ if [ "$LINK" = 1 ]; then
   elif ask "Create the symlink?"; then
     mkdir -p "$LINK_DIR"
     ln -sf "$ROOT/meet" "$LINK_DIR/meet"
-    case ":$PATH:" in *":$LINK_DIR:"*) ;; *) echo "note: $LINK_DIR is not in your PATH; add it to your shell profile" ;; esac
   fi
+  # New Terminal windows only find `meet` if LINK_DIR is in the login shell's PATH.
+  case ":$LOGIN_PATH:" in
+    *":$LINK_DIR:"*) ;;
+    *)
+      case "$(basename "${SHELL:-/bin/zsh}")" in bash) PROFILE="$HOME/.bash_profile" ;; *) PROFILE="$HOME/.zprofile" ;; esac
+      if [ -n "$BREW" ] && [ "$LINK_DIR" = "$("$BREW" --prefix)/bin" ]; then
+        LINE="eval \"\$($BREW shellenv)\""
+      else
+        LINE="export PATH=\"$LINK_DIR:\$PATH\""
+      fi
+      if grep -qsF "$LINE" "$PROFILE"; then
+        echo "$PROFILE already adds $LINK_DIR to PATH; open a new Terminal window to use 'meet'"
+      elif ask "$LINK_DIR isn't in your PATH, so Terminal won't find 'meet'. Add it to $PROFILE?"; then
+        printf '\n# Added by meet-transcriber/install.sh\n%s\n' "$LINE" >>"$PROFILE"
+        echo "added to $PROFILE; open a new Terminal window to use 'meet'"
+      else
+        echo "note: $LINK_DIR is not in your PATH; add it to your shell profile to use 'meet' in Terminal (the menu bar app works without it)"
+      fi
+      ;;
+  esac
 fi
 
 if [ "$APP" = 1 ]; then
@@ -153,11 +228,21 @@ if [ "$APP" = 1 ]; then
     xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
     open "$DEST"
     echo "Meet Transcriber is in your menu bar (and in Spotlight). Use its ⋯ menu to turn on 'Open at login'."
+    echo "Don't see its mic icon? On a MacBook with a notch, a full menu bar hides icons behind the notch:"
+    echo "open Meet Transcriber from Spotlight (⌘Space) to show its panel, or quit a few other menu bar apps."
   fi
 fi
 
 echo "==> Checking setup"
-"$ROOT/meet" doctor || true
+if ! "$ROOT/meet" doctor; then
+  echo
+  echo "Almost there: fix the problems listed above, then run ./install.sh again (or 'meet doctor' to re-check)."
+  trap - EXIT
+  exit 1
+fi
+trap - EXIT
 echo
-echo "Next: click the mic icon in the menu bar (or run 'meet start test'), say a few words, then stop."
-echo "macOS will ask for Microphone and System Audio Recording permission for 'meet-capture' on the first run."
+echo "All set. Next: click the mic icon in the menu bar (or run 'meet start test'), say a few words, then stop."
+echo "On the first recording macOS asks for Microphone and System Audio Recording permission for 'meet-capture': allow both."
+echo "If the 'Them' side stays silent, turn on meet-capture in System Settings > Privacy & Security >"
+echo "Screen & System Audio Recording > System Audio Recording Only."

@@ -18,18 +18,29 @@ Record a meeting from your side on a Mac (your mic + the meeting's system audio)
 
 ## Setup
 
+Open **Terminal** (⌘Space, type "Terminal") and paste these two lines, one at a time:
+
 ```bash
-git clone https://github.com/m-artinho/meet-transcriber.git && cd meet-transcriber
-./install.sh
+cd ~ && git clone https://github.com/m-artinho/meet-transcriber.git
 ```
 
-The installer does the following, asking before each install or download (no sudo):
-1. Checks the prerequisites.
+```bash
+~/meet-transcriber/install.sh
+```
+
+- **A window asks to install "command line developer tools"?** Click **Install**, wait until it's done, then paste the line again. This happens on Macs that have never had developer tools.
+- **No Homebrew?** The installer offers to install it. It asks for your Mac password (typing doesn't show anything, that's normal).
+- The installer asks a few yes/no questions: type `y` and press Enter. The model download is ~1.6 GB, so it takes a few minutes.
+- **Keep the folder where it is** (`~/meet-transcriber`): the app and the `meet` command run from it. Don't put it in Downloads, Desktop or Documents.
+- **Something failed?** Read the last few lines, fix what they say, and run `~/meet-transcriber/install.sh` again. It skips the steps that are already done. See [Install problems](#install-problems).
+
+The installer does the following, asking before each install or download:
+1. Checks the prerequisites (Command Line Tools, Homebrew; it finds Homebrew even if it isn't on your `PATH` yet).
 2. Builds `bin/meet-capture` (the Swift recorder) and `bin/app.noindex/Meet Transcriber.app` (the menu bar app; `.noindex` keeps this build copy out of Spotlight).
 3. Offers to `brew install whisper-cpp`.
 4. Downloads the models into `~/Library/Application Support/meet/models/`: large-v3-turbo (~1.6 GB) and Silero VAD (~1 MB), both checksum-verified.
 5. Asks where transcripts should go (a Finder folder picker, or type a path) and writes `~/.config/meet/config`. On later runs it keeps the folder you already chose.
-6. Symlinks `meet` into your Homebrew `bin`, or `~/.local/bin` if that isn't writable.
+6. Symlinks `meet` into your Homebrew `bin`, or `~/.local/bin` if that isn't writable. If that folder isn't on your `PATH`, it offers to add it to `~/.zprofile`.
 7. Copies **Meet Transcriber** into `~/Applications` and opens it. It's in Spotlight too (⌘Space, "Meet Transcriber").
 8. Runs `meet doctor`.
 
@@ -213,6 +224,17 @@ Notes:
 - **Other accounts on this Mac.** Recordings, the log and `~/.config/meet` are owner-only (mode 0700). New transcripts are written mode 0600. Audio and notes stay unreadable to other user accounts on the machine.
 
 ## Troubleshooting
+
+### Install problems
+
+- **`xcrun: error: invalid active developer path`, or "Command Line Tools aren't installed":** run `xcode-select --install`, click Install, then run `./install.sh` again.
+- **Build fails with errors about the SDK, the compiler or a module:** the Command Line Tools are older than your macOS. Update them in System Settings → General → Software Update, or reinstall: `sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install`.
+- **"You have not agreed to the Xcode license":** `sudo xcodebuild -license accept`, or open Xcode once.
+- **`meet: command not found`:** open a new Terminal window (the installer added `meet` to your `PATH` in `~/.zprofile`). The menu bar app works either way.
+- **No mic icon in the menu bar:** on MacBooks with a notch, a full menu bar hides icons behind it. Open **Meet Transcriber** from Spotlight (⌘Space) to show its panel, or quit some other menu bar apps. On macOS 26, also check System Settings → Menu Bar.
+- **`permission denied: ./install.sh`** (e.g. after downloading a ZIP): run `bash install.sh`.
+
+### While recording
 
 - **`system: silent ⚠️` while people are talking:** the System Audio Recording permission for `meet-capture` is missing (System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only). macOS records silence instead of failing.
 - **No "Me" lines:** check `meet doctor` for the input devices, and set `MEET_MIC` to the mic your meeting app actually uses. Bluetooth mics send silence while you're not talking, so occasional gaps are normal.
