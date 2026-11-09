@@ -7,6 +7,8 @@ Record a meeting from your side on a Mac (your mic + the meeting's system audio)
 - **Me / Them.** Your mic is one track and system audio is the other, so speaker labels come from which track the speech is on. There's no diarization of the other side.
 - **Works with any meeting app** (Teams, Zoom, Meet in a browser…), because it records the Mac's audio, not the app.
 - **Menu bar app or terminal.** A small menu bar app shows a red dot and timer while recording, so you can't forget one is running. Everything also works from the `meet` command.
+- **Doesn't let you forget to record.** When a meeting app starts using your mic, the menu bar app offers to record, and (optionally) fills in the meeting's name from your calendar.
+- **Obsidian-friendly files.** Names like `Q4 Review [Draft] | Ana #2` become `2026-11-09_1700_q4-review-draft-ana-2.md`, so links to transcripts always work.
 
 ## Requirements
 
@@ -63,6 +65,7 @@ Your config (transcripts folder, mic, prompt) is kept, nothing is downloaded aga
 - `meet` itself needs no build: the command is a symlink to the repo, so a `git pull` is enough for CLI changes.
 - Menu bar app changes need `./build.sh`, which refreshes the copy in `~/Applications`; quit and reopen the app (or let `./install.sh` do it).
 - If the recorder (`capture/main.swift`) changed, the rebuild is re-signed and macOS asks for the Microphone and System Audio Recording permissions again.
+- If you use calendar names and the app changed, macOS treats the new app as not yet asked: names stop filling in until you click ⋯ → **Allow Calendar access…** once.
 
 **Setting up with Claude Code:** open this folder in Claude Code and ask it to set up meet. [`CLAUDE.md`](CLAUDE.md) tells it what to ask you and which commands to run.
 
@@ -74,6 +77,7 @@ On the first `meet start`, macOS asks for permissions for **meet-capture** itsel
 2. **System audio:** System Settings → Privacy & Security → Screen & System Audio Recording → **System Audio Recording Only** → enable `meet-capture`.
    If this is missing, macOS doesn't error: the system track just records silence, and `meet status` shows `system: silent ⚠️` while a call is playing.
 3. **Notifications:** banners come from `osascript`, which appears as **Script Editor** in System Settings → Notifications. Enable it if you don't see banners.
+4. **Calendars (optional):** only if you turn on ⋯ → Name meetings from Calendar in the menu bar app, which then asks once for **Meet Transcriber** (System Settings → Privacy & Security → Calendars). Recording never needs it.
 
 The helper is ad-hoc signed, and macOS ties the grants to its signature. A rebuild (`./build.sh --force`, or after editing `capture/main.swift`) can make macOS ask again. On managed Macs (MDM), IT policy may block these toggles.
 
@@ -92,7 +96,7 @@ Click the mic icon in the menu bar:
 - **Always:** your last transcripts (click to open) and **Transcripts**, which opens the inbox folder.
 - **⋯ menu:** Check setup (`meet doctor`), Change transcripts folder, Open at login, Name meetings from Calendar (see below), Open log, Quit. Quitting the app doesn't stop a recording.
 
-**So you don't forget to record:** when Teams, Zoom, FaceTime or a browser (Chrome, Safari, Edge, Arc, Firefox) has been using the mic for 5 seconds and nothing is recording, a small panel in the top-right corner says "*App* is using your mic", with an optional name field, **Record** and **Not now**. It doesn't take focus from your meeting app.
+**So you don't forget to record:** when Teams, Zoom, FaceTime, Slack (huddles) or a browser (Chrome, Safari, Edge, Arc, Firefox) has been using the mic for 5 seconds and nothing is recording, a small panel in the top-right corner says "*App* is using your mic", with an optional name field, **Record** and **Not now**. It doesn't take focus from your meeting app. Slack also uses the mic for voice clips; one longer than 5 seconds gets the panel too (**Not now**).
 - **Record** starts a recording exactly like **Start recording** in the panel.
 - **Not now** means that app isn't suggested again until it has been off the mic for 2 minutes, so one call never asks twice. The same goes for an app still using the mic when you stop a recording. With calendar names on (below), back-to-back meetings in the same app are still caught: if the app comes back to the mic for a different calendar event, it asks again right away.
 - The panel closes on its own when the app stops using the mic or a recording starts. If a call is already going when the app opens, it asks right away.
@@ -103,13 +107,13 @@ Click the mic icon in the menu bar:
 - **Several possible events** (say, two at 17:00): the field stays empty and up to 3 events are listed; click one to put its title in the field. Nothing is picked for you.
 - **No match** (an ad-hoc call, an event you declined, a cancelled or all-day event): the panel is exactly the plain one.
 
-An event counts as the clear match when it's the only one, or the only one whose video link (Teams, Zoom, Meet, FaceTime, Webex) fits the app on the mic. A meeting starting now always wins over one already going; meetings already going are only listed after it when there are several. Event titles are only used to fill the field: they're never logged or stored anywhere else. If access is denied or removed, the panel is the plain one and the ⋯ menu offers **Open Privacy Settings…**. After an update that changes the app, macOS treats it as a new app that hasn't asked yet: the panel is the plain one until you click ⋯ → **Allow Calendar access…** once.
+An event counts as the clear match when it's the only one, or the only one whose video link (Teams, Zoom, Meet, FaceTime, Webex, Slack huddle) fits the app on the mic. A meeting starting now always wins over one already going; meetings already going are only listed after it when there are several. Event titles are only used to fill the field: they're never logged or stored anywhere else. If access is denied or removed, the panel is the plain one and the ⋯ menu offers **Open Privacy Settings…**. After an update that changes the app, macOS treats it as a new app that hasn't asked yet: the panel is the plain one until you click ⋯ → **Allow Calendar access…** once.
 
 **So a recording doesn't run all night:** if there's been no meeting audio for 15 minutes, the icon turns orange and you get a notification (repeated every 30 minutes). After 3 hours you also get an hourly reminder. Nothing is stopped automatically.
 
 While recording, a thin red bar runs along the bottom of every screen (orange when there's no meeting audio). After an hour, and then every 30 minutes, or as soon as there's no meeting audio, a small panel in the top-right corner asks whether to **Keep recording** or **Stop & save** (which goes on to the Add tags step). It doesn't take focus from your meeting app, and closing it counts as Keep recording.
 
-**So you don't forget to stop:** while recording, if Teams, Zoom, FaceTime or a browser was using the mic and lets go of it (you left the call), a panel asks "*App* call ended?" within a few seconds, with **Keep recording** and **Stop & save**. It only asks, it never stops on its own. Keep recording means it asks again only if that app picks up the mic and lets go again. After **Stop & save**, an app already on the mic for your next call is suggested for recording as usual. Recordings where no meeting app used the mic (in person) never ask. A browser with another tab still using the mic counts as still in the call.
+**So you don't forget to stop:** while recording, if Teams, Zoom, FaceTime, Slack or a browser was using the mic and lets go of it (you left the call), a panel asks "*App* call ended?" within a few seconds, with **Keep recording** and **Stop & save**. It only asks, it never stops on its own. Keep recording means it asks again only if that app picks up the mic and lets go again. After **Stop & save**, an app already on the mic for your next call is suggested for recording as usual. Recordings where no meeting app used the mic (in person) never ask. A browser with another tab still using the mic counts as still in the call.
 
 The app is a front end for the `meet` command: it runs `meet start`, `meet stop`, `meet status --json` and so on, so the app and the terminal always agree. You can start in one and stop in the other.
 
@@ -248,6 +252,7 @@ Notes:
 - **`system: silent ⚠️` while people are talking:** the System Audio Recording permission for `meet-capture` is missing (System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only). macOS records silence instead of failing.
 - **No "Me" lines:** check `meet doctor` for the input devices, and set `MEET_MIC` to the mic your meeting app actually uses. Bluetooth mics send silence while you're not talking, so occasional gaps are normal.
 - **macOS asks for permissions again:** the recorder was rebuilt (each build is re-signed). Allow once more.
+- **Calendar names stopped filling in:** open the ⋯ menu. **Allow Calendar access…** means the app was updated and needs one more Allow; **Open Privacy Settings…** means access is off for Meet Transcriber in System Settings → Privacy & Security → Calendars. A name is only filled in for an event that starts within 5 minutes of when you joined, or one already going (not ending within 5 minutes, at most 4 hours long); all-day, declined and cancelled events are skipped.
 - **No notifications:** enable "Script Editor" in System Settings → Notifications.
 - **Something odd mid-recording:** `meet status` shows per-track health. `~/Library/Logs/meet/meet.log` has a timestamped recorder log for every recording (device switches, rebuilds, slow starts).
 - **Recording forgotten:** the menu bar app warns after 15 minutes without meeting audio and hourly after 3 hours. Trim long transcripts by hand; nothing is stopped automatically.
