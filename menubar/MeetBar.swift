@@ -1104,6 +1104,14 @@ enum CalendarMatch: Equatable {
     case choices([CalendarCandidate]) // several: empty field, up to `maxChoices` rows to pick from
 }
 
+/// A lookup's answer: the banner's match, and every event it considered (`CalendarRank.keys`).
+/// `keys` is nil when unknown (off, no access, timed out).
+struct CalendarResult {
+    let match: CalendarMatch
+    let keys: Set<String>?
+    static let unknown = CalendarResult(match: .none, keys: nil)
+}
+
 enum CalendarRank {
     /// An event matches when you joined up to `joinEarly` before its start or up to `joinLate` after it.
     static let joinEarly: TimeInterval = 5 * 60
@@ -1135,14 +1143,8 @@ enum CalendarRank {
         let services = VideoService.services(forApp: app)
         var starting: [Scored] = [], ongoing: [Scored] = []
         for e in events {
-            let title = e.title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            let key = title.lowercased()
-            guard !title.isEmpty, !placeholderTitles.contains(key), !canceledPrefixes.contains(where: key.hasPrefix),
-                  !e.isAllDay, !e.isCanceled, !e.isBirthday, e.response != .declined else { continue }
-            let startsNow = e.start >= joined.addingTimeInterval(-joinLate) && e.start <= joined.addingTimeInterval(joinEarly)
-            let inProgress = e.start < joined.addingTimeInterval(-joinLate) && e.end >= joined.addingTimeInterval(endMargin)
-                && e.end.timeIntervalSince(e.start) <= maxInProgress
-            guard startsNow || inProgress else { continue }
+            guard let found = eligible(e, joined) else { continue }
+            let title = found.title, key = title.lowercased(), startsNow = found.startsNow
             let s = Scored(title: title, event: e, matchesApp: !e.links.isDisjoint(with: services),
                            contradicts: !e.links.isEmpty && e.links.isDisjoint(with: services))
             // The same invite synced into two accounts: one candidate, the better copy.
@@ -1165,6 +1167,39 @@ enum CalendarRank {
             return .choices(rows.prefix(maxChoices).map(candidate))
         case .none: return .none
         }
+    }
+
+    /// The event's cleaned title and group when it counts for a call joined at `joined`, else nil.
+    private static func eligible(_ e: CalendarEvent, _ joined: Date) -> (title: String, startsNow: Bool)? {
+        let title = e.title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let key = title.lowercased()
+        guard !title.isEmpty, !placeholderTitles.contains(key), !canceledPrefixes.contains(where: key.hasPrefix),
+              !e.isAllDay, !e.isCanceled, !e.isBirthday, e.response != .declined else { return nil }
+        let startsNow = e.start >= joined.addingTimeInterval(-joinLate) && e.start <= joined.addingTimeInterval(joinEarly)
+        let inProgress = e.start < joined.addingTimeInterval(-joinLate) && e.end >= joined.addingTimeInterval(endMargin)
+            && e.end.timeIntervalSince(e.start) <= maxInProgress
+        return startsNow || inProgress ? (title, startsNow) : nil
+    }
+
+    /// Identity of a meeting for the snooze: same title and start time.
+    static func key(_ title: String, _ start: Date) -> String {
+        title.lowercased() + "|" + String(Int(start.timeIntervalSince1970))
+    }
+
+    /// Every event `rank` considers for a call joined at `joined` (both groups), as `key`s. A snoozed app
+    /// that comes back to the mic is a new meeting when this holds a key its snooze didn't.
+    static func keys(_ events: [CalendarEvent], joined: Date) -> Set<String> {
+        Set(events.compactMap { e in eligible(e, joined).map { key($0.title, e.start) } })
+    }
+
+    enum Return: Equatable { case sameMeeting, newMeeting(ambiguous: Bool) }
+
+    /// A snoozed app is back on the mic: `keys` are the events around now, `covered` those its snooze
+    /// was for. Any new event = a new meeting. If a covered event is also still going, it may be a
+    /// rejoin of the old call while another event started (`ambiguous`: offer it, don't prefill).
+    static func afterSnooze(covered: Set<String>, now keys: Set<String>) -> Return {
+        if keys.subtracting(covered).isEmpty { return .sameMeeting }
+        return .newMeeting(ambiguous: !keys.isDisjoint(with: covered))
     }
 
     private enum Decision { case prefill(Scored), list([Scored]), none }
@@ -1277,20 +1312,22 @@ final class CalendarNames {
         queue.async { if self.store == nil { self.store = EKEventStore() } }
     }
 
-    /// The banner's match for `app`, joined at `joined`. `done` runs once on the main queue: right
-    /// away with `.none` when not on, else with the result, or `.none` after `timeout`.
-    func lookup(joined: Date, app: String, done: @escaping (CalendarMatch) -> Void) {
-        guard state == .on else { done(.none); return }
+    /// The banner's match for `app`, joined at `joined`, and the events considered. `done` runs once on
+    /// the main queue: right away with `.unknown` when not on, else with the result, or `.unknown` after `timeout`.
+    func lookup(joined: Date, app: String, done: @escaping (CalendarResult) -> Void) {
+        guard state == .on else { done(.unknown); return }
         var answered = false // main queue only
-        let answer: (CalendarMatch) -> Void = { match in
+        let answer: (CalendarResult) -> Void = { result in
             guard !answered else { return }
             answered = true
-            done(match)
+            done(result)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) { answer(.none) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) { answer(.unknown) }
         queue.async {
-            let match = CalendarRank.rank(self.events(around: joined), joined: joined, app: app)
-            DispatchQueue.main.async { answer(match) }
+            let events = self.events(around: joined)
+            let result = CalendarResult(match: CalendarRank.rank(events, joined: joined, app: app),
+                                        keys: CalendarRank.keys(events, joined: joined))
+            DispatchQueue.main.async { answer(result) }
         }
     }
 
@@ -1431,6 +1468,13 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
     private var since: [String: Date] = [:]    // app → on the mic continuously since
     private var offSince: [String: Date] = [:] // app → left the mic at
     private var snoozed = Set<String>()        // answered (or recorded): not again until quietGap off the mic
+    // Calendar-aware snooze (only with Calendar names on): the calendar events (CalendarRank.key) each
+    // snooze was for. A snoozed app back on the mic with an event not in here is in a new meeting.
+    private var covered: [String: Set<String>] = [:] // absent = unknown: plain quietGap rule
+    private var panelKeys: Set<String>?        // events considered for the open banner
+    private var checkingReturn = Set<String>() // apps whose return to the mic is being checked
+    private var ambiguous = Set<String>()      // un-snoozed while the old meeting still runs: no prefill
+    private var recordingSince: Date?
     private var timer: Timer?
     private var panel: PassivePanel?
     private var panelApp: String?
@@ -1477,6 +1521,7 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
             if !wasRecording {
                 wasRecording = true
                 stoppedAfterCall = false
+                recordingSince = Date()
                 closePanel()
                 stopTimer()
                 since = [:]
@@ -1487,7 +1532,11 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
             // Apps still on the mic were in the meeting just recorded: don't ask about them again.
             wasRecording = false
             if !stoppedAfterCall {
-                for app in Self.micUse().apps.keys { snoozed.insert(app); offSince[app] = nil }
+                for app in Self.micUse().apps.keys {
+                    snoozed.insert(app)
+                    offSince[app] = nil
+                    cover(app, joined: recordingSince ?? Date()) // the meeting just recorded
+                }
             }
             stoppedAfterCall = false
             scan()
@@ -1503,12 +1552,15 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
         for app in Array(since.keys) where onMic[app] == nil {
             since[app] = nil
             offSince[app] = now
+            ambiguous.remove(app)
         }
         for app in onMic.keys where since[app] == nil {
             if snoozed.contains(app), let off = offSince[app], now.timeIntervalSince(off) >= Self.quietGap {
                 snoozed.remove(app)
+                covered[app] = nil
             }
             since[app] = atLaunch ? .distantPast : now
+            if snoozed.contains(app), let c = covered[app] { checkNewMeeting(app, covered: c, returned: now) }
         }
         if let app = panelApp, onMic[app] == nil { closePanel() } // it left the mic: the call is over
         if let app = pendingApp, onMic[app] == nil { cancelPending() }
@@ -1540,21 +1592,58 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
         pendingToken += 1
         let token = pendingToken
         pendingApp = app
-        CalendarNames.shared.lookup(joined: joined, app: app) { [weak self] match in
+        CalendarNames.shared.lookup(joined: joined, app: app) { [weak self] result in
             guard let self, self.pendingToken == token, self.pendingApp == app else { return }
             self.pendingApp = nil
             // Still wanted? (A recording may have started, or the call ended, meanwhile.)
             guard self.panel == nil, !self.wasRecording, self.since[app] != nil, !self.snoozed.contains(app) else { return }
-            self.present(app: app, name: name, match: match)
+            var match = result.match
+            // Back after a snooze while the snoozed meeting is still going: offer, don't guess.
+            if self.ambiguous.remove(app) != nil, case .prefill(let event) = match { match = .choices([event]) }
+            self.present(app: app, name: name, match: match, keys: result.keys)
         }
     }
 
-    private func present(app: String, name: String, match: CalendarMatch) {
+    private func present(app: String, name: String, match: CalendarMatch, keys: Set<String>?) {
         let view = NSHostingView(rootView: MeetingSuggestion(model: model, app: name, match: match,
                                                              record: { [weak self] in self?.record($0) },
                                                              notNow: { [weak self] in self?.snooze() }))
         panelApp = app
+        panelKeys = keys
         panel = showFloatingPanel(view, delegate: self, borderless: true)
+    }
+
+    /// Snoozes `app` for the meeting(s) in `keys` (nil = unknown: only the quietGap rule applies).
+    private func snoozeApp(_ app: String, covering keys: Set<String>?) {
+        snoozed.insert(app)
+        covered[app] = keys
+        ambiguous.remove(app)
+    }
+
+    /// Adds the events around `joined` to a snooze that's already set (after a recording ends).
+    private func cover(_ app: String, joined: Date) {
+        CalendarNames.shared.lookup(joined: joined, app: app) { [weak self] result in
+            guard let self, self.snoozed.contains(app), let keys = result.keys else { return }
+            self.covered[app] = (self.covered[app] ?? []).union(keys)
+        }
+    }
+
+    /// A snoozed app is back on the mic within quietGap. With Calendar names on, one lookup decides: an
+    /// event the snooze wasn't for means a new meeting (back-to-back calls in the same app), so the
+    /// snooze is lifted and the banner follows the usual debounce. Unknown (off, timed out) = still snoozed.
+    private func checkNewMeeting(_ app: String, covered: Set<String>, returned: Date) {
+        guard CalendarNames.shared.state == .on, !checkingReturn.contains(app) else { return }
+        checkingReturn.insert(app)
+        CalendarNames.shared.lookup(joined: returned, app: app) { [weak self] result in
+            guard let self else { return }
+            self.checkingReturn.remove(app)
+            guard let keys = result.keys, self.snoozed.contains(app), self.since[app] != nil, !self.wasRecording,
+                  case .newMeeting(let ambiguous) = CalendarRank.afterSnooze(covered: covered, now: keys) else { return }
+            self.snoozed.remove(app)
+            self.covered[app] = nil
+            if ambiguous { self.ambiguous.insert(app) }
+            self.scan()
+        }
     }
 
     private func cancelPending() {
@@ -1568,18 +1657,20 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
         model.start(typed: name, failed: { [weak self] in self?.model.showPanel?() })
     }
 
-    /// Not now: closes, and this app isn't suggested again until it's been off the mic for quietGap.
+    /// Not now: closes, and this app isn't suggested again until it's been off the mic for quietGap
+    /// (or, with Calendar names on, it comes back for a different calendar event).
     private func snooze() {
-        if let app = panelApp { snoozed.insert(app) }
+        if let app = panelApp { snoozeApp(app, covering: panelKeys) }
         closePanel()
     }
 
     /// The close button = Not now.
     func windowWillClose(_ notification: Notification) {
         guard panel != nil else { return }
-        if let app = panelApp { snoozed.insert(app) }
+        if let app = panelApp { snoozeApp(app, covering: panelKeys) }
         panel = nil
         panelApp = nil
+        panelKeys = nil
     }
 
     private func closePanel() {
@@ -1587,6 +1678,7 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
         guard let p = panel else { return }
         panel = nil
         panelApp = nil
+        panelKeys = nil
         p.orderOut(nil)
     }
 

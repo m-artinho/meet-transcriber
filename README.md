@@ -94,7 +94,7 @@ Click the mic icon in the menu bar:
 
 **So you don't forget to record:** when Teams, Zoom, FaceTime or a browser (Chrome, Safari, Edge, Arc, Firefox) has been using the mic for 5 seconds and nothing is recording, a small panel in the top-right corner says "*App* is using your mic", with an optional name field, **Record** and **Not now**. It doesn't take focus from your meeting app.
 - **Record** starts a recording exactly like **Start recording** in the panel.
-- **Not now** means that app isn't suggested again until it has been off the mic for 2 minutes, so one call never asks twice. The same goes for an app still using the mic when you stop a recording.
+- **Not now** means that app isn't suggested again until it has been off the mic for 2 minutes, so one call never asks twice. The same goes for an app still using the mic when you stop a recording. With calendar names on (below), back-to-back meetings in the same app are still caught: if the app comes back to the mic for a different calendar event, it asks again right away.
 - The panel closes on its own when the app stops using the mic or a recording starts. If a call is already going when the app opens, it asks right away.
 - It only looks at which apps are using a mic, never at audio, and needs no extra permission. A browser counts whenever it uses the mic, so a voice message in a web app can trigger it too.
 
