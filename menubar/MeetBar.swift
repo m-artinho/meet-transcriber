@@ -1267,7 +1267,8 @@ final class CalendarNames {
         }
     }
 
-    /// The menu toggle. Turning it on is the only thing that ever brings up the Calendar prompt.
+    /// The menu toggle. Turning it on asks for access the first time; after that the only other prompt
+    /// is at launch of a new build that lost the grant (`launched`), and only while this is on.
     func setEnabled(_ on: Bool, changed: @escaping () -> Void) {
         UserDefaults.standard.set(on, forKey: Self.enabledKey)
         queue.async { self.store = nil }
@@ -1301,6 +1302,13 @@ final class CalendarNames {
     }
 
     /// Opens the event store ahead of the first banner (only when on and allowed).
+    /// At launch. With Calendar names on and macOS reporting "not yet asked" (a new build: the grant is
+    /// tied to the code hash, and a changed app can lose it), ask right away rather than leaving the
+    /// banner plain until ⋯ → Allow Calendar access. Off, allowed or denied: no prompt.
+    func launched(_ changed: @escaping () -> Void) {
+        if state == .needsAccess { requestAccess(changed) } else { warmUp() }
+    }
+
     func warmUp() {
         guard state == .on else { return }
         queue.async { if self.store == nil { self.store = EKEventStore() } }
@@ -1778,7 +1786,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         safeguards.onCallEndedStop = { [weak self] in self?.detector.callEndedStop() }
         detector.start()
-        CalendarNames.shared.warmUp() // no-op unless Calendar names is on and allowed (never prompts)
+        // Calendar names on but a new build reads as "not yet asked": ask now. Off (default): nothing.
+        CalendarNames.shared.launched { Model.shared.objectWillChange.send() }
         // After a stop from a hotkey/URL (or with the panel closed), bring up the tags step;
         // on first run, the folder step.
         Model.shared.showPanel = { [weak self] in
