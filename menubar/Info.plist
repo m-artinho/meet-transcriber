@@ -33,6 +33,8 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Meet Transcriber reads the title of the calendar event you are joining to suggest a name for the recording. It never changes your calendars.</string>
 	<key>MeetCLIPath</key>
 	<string>__MEET_CLI__</string>
 </dict>

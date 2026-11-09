@@ -74,9 +74,71 @@ class SlugAndTagTests(unittest.TestCase):
         self.assertEqual(meet.slugify("São Paulo Q&A 2026"), "sao-paulo-q-a-2026")
         self.assertEqual(meet.slugify("Hello!! World"), "hello-world")
         self.assertEqual(meet.slugify("  multiple   spaces  "), "multiple-spaces")
-        self.assertEqual(meet.slugify(""), "")
-        self.assertEqual(meet.slugify("---"), "")
         self.assertEqual(meet.slugify("hello-world-this-is-a-very-long-title", 20), "hello-world-this-is")
+
+    # Every name, typed or from the calendar: (name, slug).
+    SLUG_CASES = [
+        ("Q4 Review [Draft] | Ana #2", "q4-review-draft-ana-2"),
+        ("1:1 Ana / João", "1-1-ana-joao"),
+        ("Reunião: Planejamento ^v2", "reuniao-planejamento-v2"),
+        ("WEEKLY SYNC", "weekly-sync"),
+        ("ALL-HANDS: Q4 PLANNING", "all-hands-q4-planning"),
+        ("🎉🚀", "meeting"),
+        ("???", "meeting"),
+        ("日本語の会議", "meeting"),
+        ("", "meeting"),
+        ("---", "meeting"),
+        ("Weekly product and engineering planning sync with the extended leadership team and partners",
+         "weekly-product-and-engineering-planning-sync-with-the"),
+        ("a" * 80, "a" * 60),
+        ("Ana's 1:1 — follow-up", "anas-1-1-follow-up"),
+        ("Ana’s 1:1 — follow-up", "anas-1-1-follow-up"),
+        ("Anaʼs sync", "anas-sync"),
+        ("Straße Ærø", "strasse-aero"),
+        ("Łódź Œuvre Þing", "lodz-oeuvre-thing"),
+        ("Back\\slash: path/to C# [[link]]", "back-slash-path-to-c-link"),
+        ("Planning 🎉 sync", "planning-sync"),
+    ]
+
+    def test_slugify_rules(self):
+        for name, slug in self.SLUG_CASES:
+            self.assertEqual(meet.slugify(name), slug, repr(name))
+        self.assertEqual(meet.slugify(None), "meeting")
+
+    def test_slug_is_always_obsidian_safe(self):
+        started = dt.datetime(2026, 11, 9, 17, 0, 0)
+        for name, _ in self.SLUG_CASES:
+            slug = meet.slugify(name)
+            self.assertRegex(slug, r"^[a-z0-9]+(-[a-z0-9]+)*$", repr(name))  # no edge or doubled hyphens
+            self.assertLessEqual(len(slug), meet.SLUG_MAX)
+            self.assertRegex(meet.output_name({"initiative": slug}, started) + ".md",
+                             r"^\d{4}-\d{2}-\d{2}_\d{4}_[a-z0-9-]+\.md$")
+
+    def test_long_slug_cuts_on_a_word_boundary(self):
+        words = "alpha-bravo-charlie-delta-echo-foxtrot-golf-hotel-india-juliett"  # 63 chars
+        self.assertEqual(meet.slugify(words), "alpha-bravo-charlie-delta-echo-foxtrot-golf-hotel-india")
+        exact = "a" * 30 + "-" + "b" * 29  # exactly 60: kept whole
+        self.assertEqual(meet.slugify(exact), exact)
+        self.assertEqual(meet.slugify(exact + " c"), exact)  # boundary right at 60
+        one_long_word = "x-" + "y" * 70  # only boundary is before 20 chars: hard cut
+        self.assertEqual(meet.slugify(one_long_word), ("x-" + "y" * 70)[:60])
+
+    def test_meeting_names(self):
+        self.assertEqual(meet.meeting_names("  Weekly\n\t sync  "), ("Weekly sync", "weekly-sync"))
+        self.assertEqual(meet.meeting_names(""), ("Meeting", "meeting"))
+        self.assertEqual(meet.meeting_names("   "), ("Meeting", "meeting"))
+        self.assertEqual(meet.meeting_names("🎉🚀"), ("🎉🚀", "meeting"))  # title kept, slug falls back
+        self.assertEqual(meet.meeting_names("Q4 Review [Draft] | Ana #2"),
+                         ("Q4 Review [Draft] | Ana #2", "q4-review-draft-ana-2"))
+
+    def test_heading_text_strips_obsidian_markup(self):
+        self.assertEqual(meet.heading_text("Q4 Review [Draft] | Ana #2"), "Q4 Review Draft Ana 2")
+        self.assertEqual(meet.heading_text("Reunião: Planejamento ^v2"), "Reunião: Planejamento v2")
+        self.assertEqual(meet.heading_text("1:1 Ana / João"), "1:1 Ana / João")
+        self.assertEqual(meet.heading_text("Sync #infra [[Roadmap]]"), "Sync infra Roadmap")
+        self.assertEqual(meet.heading_text("🎉🚀"), "🎉🚀")
+        self.assertEqual(meet.heading_text("#^[]|"), "Meeting")
+        self.assertEqual(meet.heading_text(""), "Meeting")
 
     def test_tagify_keeps_accents_and_drops_numeric(self):
         self.assertEqual(meet.tagify("Migração"), "migração")
@@ -375,6 +437,28 @@ class MarkdownTests(unittest.TestCase):
         quoted = meet.render_markdown({"title": 'Say "hi"', "initiative": "say-hi"}, started, ended, [], ["en"])
         self.assertIn('title: "Say \\"hi\\""\n', quoted)
         self.assertIn('# Say "hi"\n', quoted)
+
+        # Frontmatter keeps the original title verbatim; only the heading drops # ^ [ ] |.
+        marked = meet.render_markdown({"name": "Q4 Review [Draft] | Ana #2", "initiative": "q4-review-draft-ana-2"},
+                                      started, ended, [], ["en"])
+        self.assertIn('title: "Q4 Review [Draft] | Ana #2"\n', marked)
+        self.assertIn("\n# Q4 Review Draft Ana 2\n", marked)
+        caret = meet.render_markdown({"name": "Reunião: Planejamento ^v2", "initiative": "reuniao-planejamento-v2"},
+                                     started, ended, [], ["pt"])
+        self.assertIn('title: "Reunião: Planejamento ^v2"\n', caret)
+        self.assertIn("\n# Reunião: Planejamento v2\n", caret)
+
+    def test_same_name_same_minute_gets_a_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for second in (5, 40):
+                started = dt.datetime(2026, 11, 9, 17, 0, second)
+                title, slug = meet.meeting_names("Q4 Review [Draft] | Ana #2")
+                info = {"name": title, "initiative": slug}
+                name = meet.output_name(info, started)
+                paths.append(meet.write_atomic(tmp, name, meet.render_markdown(info, started, started, [], [])))
+            self.assertEqual([p.name for p in paths], ["2026-11-09_1700_q4-review-draft-ana-2.md",
+                                                       "2026-11-09_1700_q4-review-draft-ana-2-2.md"])
 
 
 class SetConfigTests(unittest.TestCase):
