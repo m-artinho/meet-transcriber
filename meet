@@ -253,10 +253,40 @@ def pid_alive(pid):
         return True
 
 
-def slugify(text, max_len=60):
+SLUG_MAX = 60
+SLUG_FALLBACK = "meeting"
+# Letters that NFKD doesn't decompose, so the ASCII fold would drop them ("Straße" -> "strae").
+SLUG_TRANSLIT = str.maketrans({"ß": "ss", "æ": "ae", "Æ": "ae", "ø": "o", "Ø": "o", "œ": "oe", "Œ": "oe",
+                               "ł": "l", "Ł": "l", "đ": "d", "Đ": "d", "ð": "d", "Ð": "d", "þ": "th", "Þ": "th"})
+
+
+def slugify(text, max_len=SLUG_MAX):
+    """Filename part for any meeting name, typed or from the calendar: lowercase ASCII letters
+    and digits, words joined by single hyphens, so Obsidian links always work (no # ^ [ ] | / \\ :).
+    Accents fold to ASCII (Reunião -> reuniao), apostrophes vanish (Ana's -> anas), a long name is
+    cut at the last word boundary within `max_len`, and a name with no letters or digits
+    (emoji, symbols, empty) becomes "meeting"."""
+    text = (text or "").translate(SLUG_TRANSLIT)
+    text = re.sub(r"['’ʼ]", "", text)
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    text = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
-    return text[:max_len].strip("-")
+    text = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    if len(text) > max_len:
+        cut = text.rfind("-", 0, max_len + 1)
+        text = text[:cut] if cut >= max_len // 3 else text[:max_len]
+    return text.strip("-") or SLUG_FALLBACK
+
+
+def meeting_names(text):
+    """(title, slug) for `meet start <name>`: the title is the name with whitespace collapsed
+    ("Meeting" when empty); the slug is its `slugify`."""
+    title = " ".join((text or "").split()) or "Meeting"
+    return title, slugify(title)
+
+
+def heading_text(title):
+    """The note's `# ` heading: the title without the characters Obsidian reads as markup there
+    (# tag, ^ block id, [ ] link, | table/alias). The frontmatter title keeps them."""
+    return " ".join(re.sub(r"[#^\[\]|]", " ", title or "").split()) or "Meeting"
 
 
 def tagify(text):
@@ -591,7 +621,7 @@ def render_markdown(info, started, ended, segs, langs):
         "---",
     ]
     tag_line = " ".join("#" + t for t in tags) + "\n\n" if tags else ""
-    return "\n".join(fm) + f"\n\n# {title}\n\n" + tag_line + build_body(segs)
+    return "\n".join(fm) + f"\n\n# {heading_text(title)}\n\n" + tag_line + build_body(segs)
 
 
 def output_name(info, started):
@@ -807,15 +837,13 @@ def cmd_start(args):
     if problems:
         fail("Not ready to record:\n  - " + "\n  - ".join(problems) + "\nRun `meet doctor` for details.")
     kill_strays()
-    initiative = slugify(args.initiative)
-    if not initiative:
-        fail("The meeting name must contain letters or digits.")
+    name, initiative = meeting_names(args.initiative)  # no letters or digits: slug "meeting"
 
     now = dt.datetime.now().astimezone()
     rec_id = f"{now:%Y-%m-%d_%H%M%S}_{initiative}"
     rec_dir = ensure_private_dir(RECORDINGS / rec_id)
     write_json(rec_dir / "info.json", {
-        "id": rec_id, "initiative": initiative, "name": args.initiative.strip(), "status": "recording",
+        "id": rec_id, "initiative": initiative, "name": name, "status": "recording",
         "started_at": now.isoformat(timespec="seconds"), "keep_audio": args.keep_audio,
     })
 

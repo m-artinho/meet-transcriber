@@ -90,13 +90,20 @@ Click the mic icon in the menu bar:
 - **After stopping:** the panel asks for tags (the icon is an orange tag). Transcription starts right away in the background, but the transcript is only written once you **Save tags** or **Skip**. If you don't answer, it's written without tags 10 minutes after the stop (the panel counts down). Stopping from a hotkey or `meetbar://stop` opens this step automatically. As you type, tags you've used before are suggested (most used first): ↑/↓ to choose, Enter or Tab to pick, Esc to dismiss; a comma or space starts the next tag. Enter never saves or starts anything in the panel; only the buttons do.
 - **Transcribing:** an hourglass icon, and the panel shows how long it has been running. Failed transcriptions get a **Retry** button.
 - **Always:** your last transcripts (click to open) and **Transcripts**, which opens the inbox folder.
-- **⋯ menu:** Check setup (`meet doctor`), Change transcripts folder, Open at login, Open log, Quit. Quitting the app doesn't stop a recording.
+- **⋯ menu:** Check setup (`meet doctor`), Change transcripts folder, Open at login, Name meetings from Calendar (see below), Open log, Quit. Quitting the app doesn't stop a recording.
 
 **So you don't forget to record:** when Teams, Zoom, FaceTime or a browser (Chrome, Safari, Edge, Arc, Firefox) has been using the mic for 5 seconds and nothing is recording, a small panel in the top-right corner says "*App* is using your mic", with an optional name field, **Record** and **Not now**. It doesn't take focus from your meeting app.
 - **Record** starts a recording exactly like **Start recording** in the panel.
 - **Not now** means that app isn't suggested again until it has been off the mic for 2 minutes, so one call never asks twice. The same goes for an app still using the mic when you stop a recording.
 - The panel closes on its own when the app stops using the mic or a recording starts. If a call is already going when the app opens, it asks right away.
 - It only looks at which apps are using a mic, never at audio, and needs no extra permission. A browser counts whenever it uses the mic, so a voice message in a web app can trigger it too.
+
+**Meeting names from your calendar (optional, off by default):** turn on ⋯ → **Name meetings from Calendar** and macOS asks once for Calendar access (it's the only time the app asks; nothing prompts at install, at launch or during a call). It reads the calendars the Calendar app shows (iCloud, Google, Exchange, … as set up in System Settings → Internet Accounts) and never changes them. When the suggestion panel appears, it looks for an event that starts within 5 minutes of when you joined. If none does, it also takes a meeting that's already going (you joined late, or opened the app mid-call), as long as it doesn't end within the next 5 minutes and isn't longer than 4 hours (all-afternoon blocks aren't calls):
+- **One clear match:** the name field starts with the event's title, with "From Calendar · 17:00–17:30" under it and a clear (ⓧ) button. Edit or clear it before pressing **Record**.
+- **Several possible events** (say, two at 17:00): the field stays empty and up to 3 events are listed; click one to put its title in the field. Nothing is picked for you.
+- **No match** (an ad-hoc call, an event you declined, a cancelled or all-day event): the panel is exactly the plain one.
+
+An event counts as the clear match when it's the only one, or the only one whose video link (Teams, Zoom, Meet, FaceTime, Webex) fits the app on the mic. A meeting starting now always wins over one already going; meetings already going are only listed after it when there are several. Event titles are only used to fill the field: they're never logged or stored anywhere else. If access is denied or removed, the panel is the plain one and the ⋯ menu offers **Open Privacy Settings…**. After an update that changes the app, macOS treats it as a new app that hasn't asked yet: the panel is the plain one until you click ⋯ → **Allow Calendar access…** once.
 
 **So a recording doesn't run all night:** if there's been no meeting audio for 15 minutes, the icon turns orange and you get a notification (repeated every 30 minutes). After 3 hours you also get an hourly reminder. Nothing is stopped automatically.
 
@@ -123,6 +130,8 @@ meet stop                   # asks for tags, transcribes in the background, ✅ 
 ```
 
 The name you give at `meet start` is the transcript's title. Its slug (`pricing-sync`) goes into the filename and the `initiative` frontmatter field. Tags are only the ones you type at `meet stop`; press Enter to skip and the transcript has no tags.
+
+The slug is made so Obsidian links always work: lowercase letters and digits only, words joined by single hyphens. Accents become plain letters (`Reunião` → `reuniao`, `Straße` → `strasse`), apostrophes disappear (`Ana's` → `anas`), everything else (`# ^ [ ] | / \ :`, emoji) separates words, and a long name is cut at a word boundary within 60 characters. A name with no letters or digits at all (emoji only, empty) gets the slug `meeting`. Examples: `Q4 Review [Draft] | Ana #2` → `q4-review-draft-ana-2`, `1:1 Ana / João` → `1-1-ana-joao`. Two recordings with the same slug in the same minute get `-2`, `-3`, … at the end.
 
 - `meet stop --tags "pricing, q4"` skips the prompt. Tags can be typed with or without `#`.
 - `meet stop --tags-later` doesn't ask; the transcript waits (up to 10 min) for `meet tag --tags "pricing, q4"` (or `--tags ""` for none). This is what the menu bar app uses.
@@ -166,7 +175,7 @@ source: local-recording
 ...
 ```
 
-The file is written to a hidden `.tmp` file and then renamed, so a folder watcher never sees a half-written transcript. Tags are Obsidian-compatible: accents are kept, and purely numeric tags are dropped.
+The file is written to a hidden `.tmp` file and then renamed, so a folder watcher never sees a half-written transcript. Tags are Obsidian-compatible: accents are kept, and purely numeric tags are dropped. The frontmatter `title` is the name exactly as given; the `#` heading leaves out `# ^ [ ] |`, which Obsidian would read as a tag, block ID, link or table (`Q4 Review [Draft] | Ana #2` → `# Q4 Review Draft Ana 2`).
 
 ### Failure handling
 
@@ -259,7 +268,7 @@ rm -rf ~/Library/Application\ Support/meet                # models (~1.6 GB) and
 brew uninstall whisper-cpp                                # if nothing else uses it
 ```
 
-Then remove `meet-capture` from System Settings → Privacy & Security → Microphone and Screen & System Audio Recording.
+Then remove `meet-capture` from System Settings → Privacy & Security → Microphone and Screen & System Audio Recording (and Meet Transcriber from Calendars, if you turned on calendar names).
 
 ## License
 

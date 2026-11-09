@@ -9,10 +9,13 @@
 // terminal always agree. Warns when a recording seems to have outlived its
 // meeting (no meeting audio for a while, or very long), and suggests recording
 // when a meeting app (Teams, Zoom, FaceTime, a browser) starts using the mic.
+// Optionally (⋯ → Name meetings from Calendar, off by default) that suggestion
+// fills in the name of the calendar event you're joining.
 
 import AppKit
 import Combine
 import CoreAudio
+import EventKit
 import ServiceManagement
 import SwiftUI
 
@@ -320,6 +323,11 @@ final class Model: ObservableObject {
             objectWillChange.send()
         }
     }
+
+    /// ⋯ → Name meetings from Calendar (see `CalendarNames`).
+    var calendarState: CalendarNames.State { CalendarNames.shared.state }
+    func setCalendarNames(_ on: Bool) { CalendarNames.shared.setEnabled(on) { [weak self] in self?.objectWillChange.send() } }
+    func allowCalendar() { CalendarNames.shared.requestAccess { [weak self] in self?.objectWillChange.send() } }
 }
 
 // MARK: - Menu bar label
@@ -652,6 +660,15 @@ struct Panel: View {
                 Button("Check setup…") { model.runDoctor() }
                 Button("Change transcripts folder…") { model.chooseInbox() }
                 Toggle("Open at login", isOn: Binding(get: { model.openAtLogin }, set: { model.openAtLogin = $0 }))
+                // Rebuilt every second with the panel, so it shows the live Calendar permission.
+                let calendar = model.calendarState
+                Toggle("Name meetings from Calendar", isOn: Binding(get: { calendar != .off },
+                                                                     set: { model.setCalendarNames($0) }))
+                if calendar == .needsAccess {
+                    Button("Allow Calendar access…") { model.allowCalendar() }
+                } else if calendar == .denied {
+                    Button("Calendar access is off: Open Privacy Settings…") { CalendarNames.shared.openPrivacySettings() }
+                }
                 Button("Open log") { model.openLog() }
                 Divider()
                 Button(model.isRecording ? "Quit (recording continues)" : "Quit") { NSApp.terminate(nil) }
@@ -1025,19 +1042,319 @@ final class Safeguards: NSObject, NSWindowDelegate {
 // 2 s. That times the 5 s debounce and catches a meeting app joining a mic another
 // app already had open. With the mic idle, nothing runs.
 
+// MARK: - Calendar ranking (pure: plain values, no EventKit, so a test harness compiles it alone)
+
+/// Video services a calendar event can link to (in its URL, location or notes).
+enum VideoService: CaseIterable {
+    case teams, zoom, meet, facetime, webex
+
+    var hosts: [String] {
+        switch self {
+        case .teams: return ["teams.microsoft.com", "teams.live.com"]
+        case .zoom: return ["zoom.us", "zoomgov.com"]
+        case .meet: return ["meet.google.com"]
+        case .facetime: return ["facetime.apple.com"]
+        case .webex: return ["webex.com"]
+        }
+    }
+
+    static func found(in text: String) -> Set<VideoService> {
+        let t = text.lowercased()
+        return Set(allCases.filter { $0.hosts.contains(where: t.contains) })
+    }
+
+    /// What a meeting app (bundle ID) can be the client for. Browsers join any web meeting;
+    /// an app we don't know never contradicts a link.
+    static func services(forApp app: String) -> Set<VideoService> {
+        switch app {
+        case "com.microsoft.teams2", "com.microsoft.teams": return [.teams]
+        case "us.zoom.xos": return [.zoom]
+        case "com.apple.FaceTime": return [.facetime]
+        case "com.google.Chrome", "com.apple.Safari", "com.microsoft.edgemac", "company.thebrowser.Browser",
+             "org.mozilla.firefox": return [.teams, .zoom, .meet, .webex]
+        default: return Set(allCases)
+        }
+    }
+}
+
+/// My answer to an invite, best first. An event with no attendees, or one I organize, counts as accepted.
+enum MyResponse: Int { case accepted, tentative, pending, declined }
+
+/// A calendar event, copied out of EventKit into plain values.
+struct CalendarEvent {
+    var title: String
+    var start: Date
+    var end: Date
+    var isAllDay = false
+    var isCanceled = false
+    var isBirthday = false
+    var response = MyResponse.accepted
+    var links: Set<VideoService> = []
+}
+
+struct CalendarCandidate: Equatable {
+    let title: String
+    let start: Date
+    let end: Date
+}
+
+enum CalendarMatch: Equatable {
+    case none                         // today's banner
+    case prefill(CalendarCandidate)   // one clear match: the name field starts with its title
+    case choices([CalendarCandidate]) // several: empty field, up to `maxChoices` rows to pick from
+}
+
+enum CalendarRank {
+    /// An event matches when you joined up to `joinEarly` before its start or up to `joinLate` after it.
+    static let joinEarly: TimeInterval = 5 * 60
+    static let joinLate: TimeInterval = 5 * 60
+    /// An event already in progress counts if it ends at least this long after you join (not one wrapping up)
+    /// and isn't longer than `maxInProgress` (all-afternoon blocks aren't calls).
+    static let endMargin: TimeInterval = 5 * 60
+    static let maxInProgress: TimeInterval = 4 * 3600
+    static let maxChoices = 3
+    static let canceledPrefixes = ["canceled:", "cancelled:", "cancelado:", "cancelada:"] // Exchange keeps these
+    static let placeholderTitles: Set<String> = ["new event", "novo evento"]
+
+    private struct Scored {
+        let title: String
+        let event: CalendarEvent
+        let matchesApp: Bool  // links to a service the app on the mic can be in
+        let contradicts: Bool // has links, none of them for that app
+    }
+
+    /// Which name (if any) to offer for a call `app` joined at `joined`. A wrong name is worse than
+    /// none, so a title is prefilled only when one event is clearly it; otherwise the candidates are
+    /// offered with nothing picked.
+    ///
+    /// Two groups, decided the same way: events *starting* around `joined` (within `joinEarly`/`joinLate`),
+    /// and events *already in progress* (joined late, or the app opened mid-call): started earlier, ending
+    /// at least `endMargin` after `joined`, at most `maxInProgress` long (longer = a block, not a call).
+    /// Starting events win; in-progress ones are used when none start now, or fill up a list of rows.
+    static func rank(_ events: [CalendarEvent], joined: Date, app: String) -> CalendarMatch {
+        let services = VideoService.services(forApp: app)
+        var starting: [Scored] = [], ongoing: [Scored] = []
+        for e in events {
+            let title = e.title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            let key = title.lowercased()
+            guard !title.isEmpty, !placeholderTitles.contains(key), !canceledPrefixes.contains(where: key.hasPrefix),
+                  !e.isAllDay, !e.isCanceled, !e.isBirthday, e.response != .declined else { continue }
+            let startsNow = e.start >= joined.addingTimeInterval(-joinLate) && e.start <= joined.addingTimeInterval(joinEarly)
+            let inProgress = e.start < joined.addingTimeInterval(-joinLate) && e.end >= joined.addingTimeInterval(endMargin)
+                && e.end.timeIntervalSince(e.start) <= maxInProgress
+            guard startsNow || inProgress else { continue }
+            let s = Scored(title: title, event: e, matchesApp: !e.links.isDisjoint(with: services),
+                           contradicts: !e.links.isEmpty && e.links.isDisjoint(with: services))
+            // The same invite synced into two accounts: one candidate, the better copy.
+            func add(_ list: inout [Scored]) {
+                if let i = list.firstIndex(where: { $0.title.lowercased() == key && $0.event.start == e.start }) {
+                    if better(s, list[i], joined) { list[i] = s }
+                } else {
+                    list.append(s)
+                }
+            }
+            if startsNow { add(&starting) } else { add(&ongoing) }
+        }
+        starting.sort { better($0, $1, joined) }
+        ongoing.sort { better($0, $1, joined) }
+        func candidate(_ s: Scored) -> CalendarCandidate { .init(title: s.title, start: s.event.start, end: s.event.end) }
+        switch decide(starting) ?? decide(ongoing) ?? .none {
+        case .prefill(let s): return .prefill(candidate(s))
+        case .list(let list):
+            let rows = starting.isEmpty ? list : list + ongoing // starting ones first, then those already going
+            return .choices(rows.prefix(maxChoices).map(candidate))
+        case .none: return .none
+        }
+    }
+
+    private enum Decision { case prefill(Scored), list([Scored]), none }
+
+    /// One group, best first: prefill when exactly one fits the app's link, or it's the only one and
+    /// its link doesn't contradict the app; otherwise a list. nil when the group is empty.
+    private static func decide(_ kept: [Scored]) -> Decision? {
+        if kept.isEmpty { return nil }
+        let matching = kept.filter(\.matchesApp)
+        if matching.count == 1 { return .prefill(matching[0]) }
+        if kept.count == 1, !kept[0].contradicts { return .prefill(kept[0]) }
+        return .list(kept)
+    }
+
+    private static func better(_ a: Scored, _ b: Scored, _ joined: Date) -> Bool {
+        if a.matchesApp != b.matchesApp { return a.matchesApp }
+        if a.contradicts != b.contradicts { return !a.contradicts }
+        if a.event.response != b.event.response { return a.event.response.rawValue < b.event.response.rawValue }
+        let da = abs(a.event.start.timeIntervalSince(joined)), db = abs(b.event.start.timeIntervalSince(joined))
+        if da != db { return da < db }
+        return a.title < b.title
+    }
+}
+
+// MARK: - Calendar access (EventKit; only used once the user turns it on)
+
+extension CalendarEvent {
+    init?(_ e: EKEvent) {
+        guard let start = e.startDate, let end = e.endDate else { return nil }
+        var response = MyResponse.accepted
+        if let me = e.attendees?.first(where: { $0.isCurrentUser }) {
+            switch me.participantStatus {
+            case .declined: response = .declined
+            case .tentative: response = .tentative
+            case .pending, .unknown: response = .pending
+            default: response = .accepted
+            }
+        } else if let attendees = e.attendees, !attendees.isEmpty, e.organizer?.isCurrentUser != true {
+            response = .pending // invited, but my own entry isn't marked
+        }
+        let text = [e.url?.absoluteString, e.location, e.notes].compactMap { $0 }.joined(separator: "\n")
+        self.init(title: e.title ?? "", start: start, end: end, isAllDay: e.isAllDay,
+                  isCanceled: e.status == .canceled, isBirthday: e.calendar?.type == .birthday,
+                  response: response, links: VideoService.found(in: text))
+    }
+}
+
+/// ⋯ → Name meetings from Calendar. Off by default; while it's off (or access is missing,
+/// revoked, failing or slow) the suggestion banner is exactly the plain one. Event titles are
+/// only held in memory for the banner: never logged or stored.
+final class CalendarNames {
+    static let shared = CalendarNames()
+    static let enabledKey = "calendarNames"
+    static let timeout: TimeInterval = 0.5 // lookup budget before the banner shows without it
+
+    enum State { case off, on, needsAccess, denied }
+
+    private let queue = DispatchQueue(label: "local.meet.bar.calendar")
+    private var store: EKEventStore?      // only touched on `queue`
+    private var requester: EKEventStore?  // kept alive while the permission prompt is up
+
+    private var enabled: Bool { UserDefaults.standard.bool(forKey: Self.enabledKey) }
+
+    /// Read live every time: a rebuilt (re-signed) app can silently lose its grant. Off: EventKit isn't asked.
+    var state: State {
+        guard enabled else { return .off }
+        switch EKEventStore.authorizationStatus(for: .event) {
+        case .fullAccess: return .on
+        case .notDetermined: return .needsAccess
+        default: return .denied // denied, restricted, write-only
+        }
+    }
+
+    /// The menu toggle. Turning it on is the only thing that ever brings up the Calendar prompt.
+    func setEnabled(_ on: Bool, changed: @escaping () -> Void) {
+        UserDefaults.standard.set(on, forKey: Self.enabledKey)
+        queue.async { self.store = nil }
+        if on, EKEventStore.authorizationStatus(for: .event) == .notDetermined {
+            requestAccess(changed)
+        } else {
+            warmUp()
+        }
+        changed()
+    }
+
+    func requestAccess(_ changed: @escaping () -> Void) {
+        guard requester == nil else { return }
+        let s = EKEventStore()
+        requester = s
+        NSApp.activate() // the prompt comes up in front
+        s.requestFullAccessToEvents { _, _ in
+            DispatchQueue.main.async {
+                self.requester = nil
+                self.queue.async { self.store = nil }
+                self.warmUp()
+                changed()
+            }
+        }
+    }
+
+    func openPrivacySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Opens the event store ahead of the first banner (only when on and allowed).
+    func warmUp() {
+        guard state == .on else { return }
+        queue.async { if self.store == nil { self.store = EKEventStore() } }
+    }
+
+    /// The banner's match for `app`, joined at `joined`. `done` runs once on the main queue: right
+    /// away with `.none` when not on, else with the result, or `.none` after `timeout`.
+    func lookup(joined: Date, app: String, done: @escaping (CalendarMatch) -> Void) {
+        guard state == .on else { done(.none); return }
+        var answered = false // main queue only
+        let answer: (CalendarMatch) -> Void = { match in
+            guard !answered else { return }
+            answered = true
+            done(match)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) { answer(.none) }
+        queue.async {
+            let match = CalendarRank.rank(self.events(around: joined), joined: joined, app: app)
+            DispatchQueue.main.async { answer(match) }
+        }
+    }
+
+    /// On `queue`. Events overlapping the match window; [] without access.
+    private func events(around joined: Date) -> [CalendarEvent] {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return [] }
+        let store = self.store ?? EKEventStore()
+        self.store = store
+        let predicate = store.predicateForEvents(withStart: joined.addingTimeInterval(-CalendarRank.joinLate - 60),
+                                                 end: joined.addingTimeInterval(CalendarRank.joinEarly + 60),
+                                                 calendars: nil)
+        return store.events(matching: predicate).compactMap(CalendarEvent.init)
+    }
+}
+
+// MARK: - Meeting suggestion banner
+
 struct MeetingSuggestion: View {
     @ObservedObject var model: Model
     let app: String
+    let match: CalendarMatch
     let record: (String) -> Void
     let notNow: () -> Void
-    @State private var name = ""
+    @State private var name: String
+
+    init(model: Model, app: String, match: CalendarMatch = .none,
+         record: @escaping (String) -> Void, notNow: @escaping () -> Void) {
+        self.model = model
+        self.app = app
+        self.match = match
+        self.record = record
+        self.notNow = notNow
+        // Set once, before anything can be typed; after that only the user changes the field.
+        if case .prefill(let c) = match { _name = State(initialValue: c.title) } else { _name = State(initialValue: "") }
+    }
 
     var body: some View {
         BannerCard(symbol: "mic.fill", tint: .orange, headline: "\(app) is using your mic",
                    subtitle: "Looks like a call. Record it?") {
-            TextField("Meeting name (optional)", text: $name) // no onSubmit: Enter does nothing
-                .textFieldStyle(.roundedBorder)
-                .padding(.leading, 38) // lines up with the headline (icon 28 + spacing 10)
+            // Each state has a fixed height: the floating panel is sized once, when it's shown.
+            switch match {
+            case .none:
+                TextField("Meeting name (optional)", text: $name) // no onSubmit: Enter does nothing
+                    .textFieldStyle(.roundedBorder)
+                    .padding(.leading, 38) // lines up with the headline (icon 28 + spacing 10)
+            case .prefill(let event):
+                VStack(alignment: .leading, spacing: 4) {
+                    nameField
+                    Text("From Calendar · " + Self.span(event))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        .opacity(name == event.title ? 1 : 0) // hidden once edited; keeps its space
+                        .accessibilityHidden(name != event.title)
+                }
+                .padding(.leading, 38)
+            case .choices(let events):
+                VStack(alignment: .leading, spacing: 4) {
+                    nameField
+                    Text("Matching events").font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(events.indices, id: \.self) { i in choiceRow(events[i]) }
+                    }
+                }
+                .padding(.leading, 38)
+            }
             HStack(spacing: 8) {
                 Spacer()
                 Button("Not now", action: notNow).buttonStyle(.bordered)
@@ -1047,6 +1364,46 @@ struct MeetingSuggestion: View {
                     .disabled(model.busy != nil)
             }
         }
+    }
+
+    /// The name field with a clear button (calendar states only).
+    private var nameField: some View {
+        HStack(spacing: 6) {
+            TextField("Meeting name (optional)", text: $name) // no onSubmit: Enter does nothing
+                .textFieldStyle(.roundedBorder)
+            Button { name = "" } label: { Image(systemName: "xmark.circle.fill") }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Clear the name")
+                .accessibilityLabel("Clear name")
+                .opacity(name.isEmpty ? 0 : 1) // keeps its space
+                .disabled(name.isEmpty)
+        }
+    }
+
+    /// One matching event: start time and title. Clicking puts the title in the field (still editable).
+    private func choiceRow(_ event: CalendarCandidate) -> some View {
+        Button { name = event.title } label: {
+            HStack(spacing: 8) {
+                Text(Self.time(event.start)).foregroundStyle(.secondary).monospacedDigit()
+                Text(event.title).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(name == event.title ? Color.accentColor.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 4))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(event.title)
+    }
+
+    static func time(_ date: Date) -> String { date.formatted(date: .omitted, time: .shortened) }
+
+    static func span(_ event: CalendarCandidate) -> String {
+        let f = DateIntervalFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f.string(from: event.start, to: event.end)
     }
 }
 
@@ -1077,6 +1434,8 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
     private var timer: Timer?
     private var panel: PassivePanel?
     private var panelApp: String?
+    private var pendingApp: String?            // its banner waits for the calendar lookup (≤ CalendarNames.timeout)
+    private var pendingToken = 0               // bumped to drop a lookup that's no longer wanted
     private var ready = false                  // the first `meet status` arrived
     private var wasRecording = false
     private var stoppedAfterCall = false       // stopped from the CallEnded banner
@@ -1152,7 +1511,8 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
             since[app] = atLaunch ? .distantPast : now
         }
         if let app = panelApp, onMic[app] == nil { closePanel() } // it left the mic: the call is over
-        if panel == nil, let hit = onMic.sorted(by: { $0.key < $1.key }).first(where: {
+        if let app = pendingApp, onMic[app] == nil { cancelPending() }
+        if panel == nil, pendingApp == nil, let hit = onMic.sorted(by: { $0.key < $1.key }).first(where: {
             !snoozed.contains($0.key) && now.timeIntervalSince(since[$0.key] ?? now) >= Self.debounce
         }) {
             show(app: hit.key, name: hit.value)
@@ -1172,12 +1532,34 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
         timer = nil
     }
 
+    /// With Calendar names off (or no access) the lookup answers `.none` right away and the banner
+    /// shows at once, as before; when on, it waits for the lookup or its timeout.
     private func show(app: String, name: String) {
-        let view = NSHostingView(rootView: MeetingSuggestion(model: model, app: name,
+        // When the app took the mic; unknown for a call already going at launch (`distantPast`).
+        let joined = since[app].flatMap { $0 == .distantPast ? nil : $0 } ?? Date()
+        pendingToken += 1
+        let token = pendingToken
+        pendingApp = app
+        CalendarNames.shared.lookup(joined: joined, app: app) { [weak self] match in
+            guard let self, self.pendingToken == token, self.pendingApp == app else { return }
+            self.pendingApp = nil
+            // Still wanted? (A recording may have started, or the call ended, meanwhile.)
+            guard self.panel == nil, !self.wasRecording, self.since[app] != nil, !self.snoozed.contains(app) else { return }
+            self.present(app: app, name: name, match: match)
+        }
+    }
+
+    private func present(app: String, name: String, match: CalendarMatch) {
+        let view = NSHostingView(rootView: MeetingSuggestion(model: model, app: name, match: match,
                                                              record: { [weak self] in self?.record($0) },
                                                              notNow: { [weak self] in self?.snooze() }))
         panelApp = app
         panel = showFloatingPanel(view, delegate: self, borderless: true)
+    }
+
+    private func cancelPending() {
+        pendingApp = nil
+        pendingToken += 1
     }
 
     /// The panel's Start recording path; a failed start opens the panel, where the error shows.
@@ -1201,6 +1583,7 @@ final class MeetingDetector: NSObject, NSWindowDelegate {
     }
 
     private func closePanel() {
+        cancelPending()
         guard let p = panel else { return }
         panel = nil
         panelApp = nil
@@ -1299,6 +1682,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         safeguards.onCallEndedStop = { [weak self] in self?.detector.callEndedStop() }
         detector.start()
+        CalendarNames.shared.warmUp() // no-op unless Calendar names is on and allowed (never prompts)
         // After a stop from a hotkey/URL (or with the panel closed), bring up the tags step;
         // on first run, the folder step.
         Model.shared.showPanel = { [weak self] in
