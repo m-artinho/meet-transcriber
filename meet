@@ -7,6 +7,7 @@
   meet status [--json]
   meet retry [recording-id] [--wait]
   meet doctor            check the setup and list input devices
+  meet inputs [--json]   input devices and which one the next recording uses
   meet config [--inbox DIR] [--mic NAME] [--prompt TEXT] [--get KEY]
 
 Config: ~/.config/meet/config (KEY=VALUE); environment variables override it.
@@ -1105,6 +1106,52 @@ def print_config(cfg):
         print(f"  {k} = {cfg[k]}")
 
 
+def parse_inputs(text):
+    """`meet-capture --list-inputs` output -> [(name, is_default)]. Our own aggregate is left out."""
+    out = []
+    for line in text.splitlines():
+        if len(line) > 2 and line[2:].strip() and line[2:] != "meet-capture":
+            out.append((line[2:], line.startswith("*")))
+    return out
+
+
+def pick_input(inputs, match):
+    """The device the recorder will open, the same rule as its pickInputDevice: the first input whose
+    name contains `match` (ignoring case), else the system default. Returns (name or None, matched)."""
+    if match:
+        for name, _ in inputs:
+            if match.casefold() in name.casefold():
+                return name, True
+    return next((name for name, default in inputs if default), None), False
+
+
+def inputs_data(cfg):
+    """Input devices plus which one the next recording uses (for `meet inputs` and the app's mic picker)."""
+    try:
+        text = subprocess.run([str(CAPTURE_BIN), "--list-inputs"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        text = ""
+    inputs = parse_inputs(text)
+    using, matched = pick_input(inputs, cfg["MEET_MIC"])
+    return {"setting": cfg["MEET_MIC"], "inputs": [n for n, _ in inputs],
+            "default": next((n for n, d in inputs if d), None), "using": using, "matched": matched}
+
+
+def cmd_inputs(args):
+    data = inputs_data(load_config())
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False))
+        return
+    if not data["inputs"]:
+        fail("No input devices found (is the recorder built? run build.sh)")
+    for name in data["inputs"]:
+        mark = "→" if name == data["using"] else " "
+        print(f"{mark} {name}" + (" (system default)" if name == data["default"] else ""))
+    if data["setting"] and not data["matched"]:
+        print(f'MEET_MIC="{data["setting"]}" matches no device, so the system default is used.')
+    print('→ = used by the next recording. Change it: meet config --mic "<name>" ("" = system default).')
+
+
 def cmd_doctor(args):
     cfg = load_config()
     print_config(cfg)
@@ -1222,6 +1269,8 @@ def main():
     s = sub.add_parser("status", help="am I recording?")
     s.add_argument("--json", action="store_true", help="machine-readable output")
     sub.add_parser("doctor", help="check the setup and list input devices")
+    s = sub.add_parser("inputs", help="list input devices and which one the next recording uses")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
     s = sub.add_parser("config", help="show or change settings (the transcripts folder, mic, prompt)")
     s.add_argument("--inbox", help="folder where transcripts (.md) are written")
     s.add_argument("--mic", help='part of an input device name; "" = system default')
@@ -1238,7 +1287,7 @@ def main():
         process(Path(args.dir))
     else:
         {"start": cmd_start, "stop": cmd_stop, "status": cmd_status, "retry": cmd_retry,
-         "doctor": cmd_doctor, "config": cmd_config, "tag": cmd_tag}[args.cmd](args)
+         "doctor": cmd_doctor, "config": cmd_config, "tag": cmd_tag, "inputs": cmd_inputs}[args.cmd](args)
 
 
 if __name__ == "__main__":

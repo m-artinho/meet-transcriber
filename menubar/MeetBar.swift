@@ -66,6 +66,15 @@ struct Status: Decodable {
     let known_tags: [String]?
 }
 
+/// `meet inputs --json`: input devices and which one the next recording uses.
+struct Inputs: Decodable {
+    let setting: String       // MEET_MIC ("" = system default)
+    let inputs: [String]
+    let `default`: String?
+    let using: String?
+    let matched: Bool
+}
+
 // MARK: - CLI bridge
 
 enum CLI {
@@ -126,6 +135,7 @@ final class Model: ObservableObject {
     @Published var busy: String?          // "Starting…" / "Stopping…"
     @Published var message: String?       // last error from the CLI
     @Published var doctor: String?        // `meet doctor` output, when shown
+    @Published var inputs: Inputs?        // for the mic picker; loaded when the panel opens
     @Published var now = Date()
     @Published var quietFor: TimeInterval = 0
 
@@ -285,6 +295,19 @@ final class Model: ObservableObject {
             if items.contains(where: { $0.name == "tags" }) { stop(tags: value("tags")) } else { stop() }
         default: message = "Unknown URL: \(url.absoluteString)"
         }
+    }
+
+    /// Reads the input devices (on each panel open, so a newly connected mic shows up).
+    func loadInputs() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = CLI.run(["inputs", "--json"])
+            let decoded = try? JSONDecoder().decode(Inputs.self, from: Data(r.out.utf8))
+            DispatchQueue.main.async { if let decoded { self.inputs = decoded } }
+        }
+    }
+    /// Mic picker: saves MEET_MIC ("" = follow the system default) for the next recording.
+    func setMic(_ name: String) {
+        perform("Saving…", ["config", "--mic=\(name)"], onSuccess: { self.loadInputs() })
     }
 
     func runDoctor() {
@@ -453,6 +476,7 @@ struct Panel: View {
             TextField("Meeting name (optional)", text: $name)
                 .textFieldStyle(.roundedBorder)
                 .focused($focus, equals: .name)
+            if let inputs = model.inputs, !inputs.inputs.isEmpty { micPicker(inputs) }
             Button(action: startIfValid) {
                 Label("Start recording", systemImage: "record.circle").frame(maxWidth: .infinity)
             }
@@ -460,9 +484,32 @@ struct Panel: View {
             .tint(.red)
             .disabled(model.busy != nil)
         }
-        .onAppear { focus = .name }
+        .onAppear { focus = .name; model.loadInputs() }
         .onReceive(NotificationCenter.default.publisher(for: NSPopover.didShowNotification)) { _ in
             if model.awaitingTags == nil { focus = .name }
+            model.loadInputs()
+        }
+    }
+
+    /// Which mic the next recording uses (MEET_MIC). A setting that matches a device shows as that
+    /// device; one that matches nothing shows as "not connected", with the default used instead.
+    private func micPicker(_ inputs: Inputs) -> some View {
+        let selection = inputs.matched ? (inputs.using ?? "") : inputs.setting
+        return VStack(alignment: .leading, spacing: 4) {
+            Picker("Mic", selection: Binding(get: { selection }, set: { if $0 != selection { model.setMic($0) } })) {
+                Text(inputs.default.map { "System default (\($0))" } ?? "System default").tag("")
+                Divider()
+                ForEach(inputs.inputs, id: \.self) { Text($0).tag($0) }
+                if !inputs.setting.isEmpty && !inputs.matched {
+                    Text("\(inputs.setting) (not connected)").tag(inputs.setting)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(model.busy != nil)
+            if !inputs.setting.isEmpty && !inputs.matched, let using = inputs.using {
+                Label("Not connected: recording from \(using)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).lineLimit(1).truncationMode(.middle)
+            }
         }
     }
 

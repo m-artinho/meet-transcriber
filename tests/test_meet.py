@@ -544,6 +544,21 @@ class MicDeviceTests(unittest.TestCase):
             self.assertIsNone(meet.mic_device(d))
 
 
+class InputTests(unittest.TestCase):
+    LIST = "  soundcore P40i\n* C922 Pro Stream Webcam\n  MacBook Pro Microphone\n  meet-capture\n"
+
+    def test_parse_skips_our_aggregate(self):
+        self.assertEqual(meet.parse_inputs(self.LIST), [
+            ("soundcore P40i", False), ("C922 Pro Stream Webcam", True), ("MacBook Pro Microphone", False)])
+
+    def test_pick_like_the_recorder(self):
+        inputs = meet.parse_inputs(self.LIST)
+        self.assertEqual(meet.pick_input(inputs, ""), ("C922 Pro Stream Webcam", False))
+        self.assertEqual(meet.pick_input(inputs, "macbook"), ("MacBook Pro Microphone", True))
+        self.assertEqual(meet.pick_input(inputs, "AirPods"), ("C922 Pro Stream Webcam", False))
+        self.assertEqual(meet.pick_input([], ""), (None, False))
+
+
 class RepairWavTests(unittest.TestCase):
     def test_repairs_data_and_riff_sizes(self):
         payload = b"\x01\x00" * 100

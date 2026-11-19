@@ -88,7 +88,7 @@ The helper is ad-hoc signed, and macOS ties the grants to its signature. A rebui
 Click the mic icon in the menu bar:
 
 - **First run:** if no transcripts folder is set yet, the panel opens with **Choose folder…** (a Finder picker) before anything else.
-- **Idle:** type the meeting name (optional) and click **Start recording**. With no name, the transcript is titled "Meeting" (`2026-10-28_1750_meeting.md`).
+- **Idle:** type the meeting name (optional) and click **Start recording**. With no name, the transcript is titled "Meeting" (`2026-10-28_1750_meeting.md`). The **Mic** menu shows which mic the recording will use and lets you pick another one (or "System default", which follows the mic set in System Settings → Sound). It's saved as `MEET_MIC`. If the chosen mic isn't connected, it says so and the system default is used.
 - **Recording:** the menu bar shows a red dot and the elapsed time. The panel shows live mic and system levels, each with a status: a check for ok, or a warning triangle for "silent" (no audio at all, usually a missing permission; hover for the hint) or "dropping audio". Under the mic bar is the name of the mic being recorded (it follows a device switch mid-call). Then **Stop recording**.
 - **Recorder crashed** (orange triangle in the menu bar): the panel offers **Transcribe what was captured**.
 - **After stopping:** the panel asks for tags (the icon is an orange tag). Transcription starts right away in the background, but the transcript is only written once you **Save tags** or **Skip**. If you don't answer, it's written without tags 10 minutes after the stop (the panel counts down). Stopping from a hotkey or `meetbar://stop` opens this step automatically. As you type, tags you've used before are suggested (most used first): ↑/↓ to choose, Enter or Tab to pick, Esc to dismiss; a comma or space starts the next tag. Enter never saves or starts anything in the panel; only the buttons do.
@@ -144,6 +144,7 @@ The slug is made so Obsidian links always work: lowercase letters and digits onl
 - `meet retry [id]` re-runs a failed or interrupted transcription (latest by default).
 - `meet doctor` checks the setup and lists input devices.
 - `meet config` shows the settings; `meet config --inbox <dir>` (or `--mic`, `--prompt`) changes them, `meet config --get MEET_INBOX` prints one.
+- `meet inputs` lists the input devices with an arrow on the one the next recording uses (`--json` for scripts).
 - `meet status --json` prints the same information as `meet status` as JSON, for scripts and the menu bar app.
 
 Transcription runs at roughly 15–20× real time on an M4 Pro, so an hour-long meeting takes a few minutes.
@@ -195,7 +196,7 @@ The file is written to a hidden `.tmp` file and then renamed, so a folder watche
 | Key | Default | |
 |---|---|---|
 | `MEET_INBOX` | required, no default | where the `.md` files go |
-| `MEET_MIC` | empty = default input | part of an input device name, e.g. `MacBook Pro Microphone`. `meet doctor` lists them |
+| `MEET_MIC` | empty = default input | part of an input device name, e.g. `MacBook Pro Microphone`. `meet inputs` lists them, or pick one in the app's Mic menu |
 | `MEET_PROMPT` | `Hi everyone, let's get started.` | whisper initial prompt. Write it in your meeting language(s); add names/jargon |
 | `MEET_KEEP_AUDIO` | `0` | keep WAVs after success |
 | `MEET_MODEL` | `…/models/ggml-large-v3-turbo.bin` | whisper model |
