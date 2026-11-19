@@ -525,6 +525,25 @@ class WriteAtomicTests(unittest.TestCase):
             self.assertFalse(tmp_link.exists())
 
 
+class MicDeviceTests(unittest.TestCase):
+    def test_last_mic_line_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = meet.Path(tmp)
+            self.assertIsNone(meet.mic_device(d))  # no log yet
+            (d / "capture.log").write_text(
+                '10:00:00.000 mic: using "C922 Pro Stream Webcam"\n'
+                '10:00:00.500 mic: recording at 16000 Hz, 2 ch\n'
+                '10:05:00.000 mic: using "soundcore P40i"\n'
+                '10:05:00.100 system: ok\n', encoding="utf-8")
+            self.assertEqual(meet.mic_device(d), "soundcore P40i")
+
+    def test_unknown_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = meet.Path(tmp)
+            (d / "capture.log").write_text('10:00:00.000 mic: using "?"\n', encoding="utf-8")
+            self.assertIsNone(meet.mic_device(d))
+
+
 class RepairWavTests(unittest.TestCase):
     def test_repairs_data_and_riff_sizes(self):
         payload = b"\x01\x00" * 100

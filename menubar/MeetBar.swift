@@ -39,6 +39,7 @@ struct Recording: Decodable {
     let started_at: String
     let alive: Bool
     let levels: LevelsFile?
+    let mic: String? // input device the recorder has open (from its log)
 }
 
 struct Job: Decodable, Identifiable {
@@ -492,6 +493,14 @@ struct Panel: View {
                 Text(hms(model.elapsed)).monospacedDigit().foregroundStyle(.secondary)
             }
             LevelRow(label: "Mic", levels: r.levels?.mic, elapsed: model.elapsed)
+            if let mic = r.mic {
+                // Under the Mic bar, lined up with it (50 pt label + 8 pt spacing).
+                Text(mic)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                    .padding(.leading, 58)
+                    .help("Recording from \(mic)")
+            }
             LevelRow(label: "System", levels: r.levels?.system, elapsed: model.elapsed)
             if model.isQuiet {
                 Label("No meeting audio for \(Int(model.quietFor / 60)) min. Did the meeting end?",

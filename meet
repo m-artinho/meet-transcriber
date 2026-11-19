@@ -995,7 +995,8 @@ def status_data():
         elapsed = (dt.datetime.now().astimezone() - parse_time(cur["started_at"])).total_seconds()
         rec = {"id": cur["id"], "name": info.get("name") or cur["initiative"], "initiative": cur["initiative"],
                "started_at": cur["started_at"], "elapsed": elapsed, "alive": pid_alive(cur.get("pid")),
-               "dir": str(rec_dir or ""), "levels": read_json(rec_dir / "levels.json") if rec_dir else None}
+               "dir": str(rec_dir or ""), "levels": read_json(rec_dir / "levels.json") if rec_dir else None,
+               "mic": mic_device(rec_dir) if rec_dir else None}
     jobs = []
     for rec_dir in recording_dirs():
         info = read_json(rec_dir / "info.json", {})
@@ -1014,6 +1015,23 @@ def status_data():
     return {"recording": rec, "jobs": jobs, "recent": recent, "inbox": cfg["MEET_INBOX"], "known_tags": known_tags()}
 
 
+MIC_USING = re.compile(r'mic: using "(.*)"\s*$', re.M)
+
+
+def mic_device(rec_dir):
+    """The input device the recorder has open: the last `mic: using "<name>"` line in its log
+    (it logs one on every (re)start, so a device switch mid-recording shows up). None if not yet known."""
+    try:
+        with open(rec_dir / "capture.log", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    found = MIC_USING.findall(text)
+    return found[-1] if found and found[-1] != "?" else None
+
+
 def cmd_status(args):
     data = status_data()
     if args.json:
@@ -1024,6 +1042,8 @@ def cmd_status(args):
         if rec["alive"]:
             print(f"🔴 Recording '{rec['name']}' for {hms(rec['elapsed'])}")
             print("   " + level_summary(Path(rec["dir"]), rec["elapsed"]))
+            if rec["mic"]:
+                print(f"   mic device: {rec['mic']}")
         else:
             print(f"⚠️  Recording '{rec['name']}' ended unexpectedly. Run `meet stop` to transcribe what was captured.")
     for job in data["jobs"]:
