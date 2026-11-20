@@ -348,6 +348,22 @@ final class Model: ObservableObject {
         }
     }
 
+    /// Open at login is on by default: the first launch from an Applications folder turns it on, once.
+    /// After that it's the user's choice (⋯ → Open at login), so turning it off sticks. Builds run from
+    /// anywhere else (bin/app.noindex, scratch copies) never register themselves.
+    func defaultOpenAtLogin() {
+        let key = "openAtLoginDefaulted"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        let path = Bundle.main.bundlePath
+        guard path.hasPrefix(NSHomeDirectory() + "/Applications/") || path.hasPrefix("/Applications/") else { return }
+        do {
+            if SMAppService.mainApp.status != .enabled { try SMAppService.mainApp.register() }
+            UserDefaults.standard.set(true, forKey: key)
+        } catch {
+            NSLog("Open at login: \(error.localizedDescription)") // tried again at the next launch
+        }
+    }
+
     /// ⋯ → Name meetings from Calendar (see `CalendarNames`).
     var calendarState: CalendarNames.State { CalendarNames.shared.state }
     func setCalendarNames(_ on: Bool) { CalendarNames.shared.setEnabled(on) { [weak self] in self?.objectWillChange.send() } }
@@ -1842,6 +1858,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         safeguards.onCallEndedStop = { [weak self] in self?.detector.callEndedStop() }
         detector.start()
+        Model.shared.defaultOpenAtLogin()
         // Calendar names on but a new build reads as "not yet asked": ask now. Off (default): nothing.
         CalendarNames.shared.launched { Model.shared.objectWillChange.send() }
         // After a stop from a hotkey/URL (or with the panel closed), bring up the tags step;

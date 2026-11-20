@@ -227,7 +227,7 @@ if [ "$APP" = 1 ]; then
     cp -R "bin/app.noindex/Meet Transcriber.app" "$DEST"
     xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
     open "$DEST"
-    echo "Meet Transcriber is in your menu bar (and in Spotlight). Use its ⋯ menu to turn on 'Open at login'."
+    echo "Meet Transcriber is in your menu bar (and in Spotlight). It opens at login (turn that off in its ⋯ menu)."
     echo "Don't see its mic icon? On a MacBook with a notch, a full menu bar hides icons behind the notch:"
     echo "open Meet Transcriber from Spotlight (⌘Space) to show its panel, or quit a few other menu bar apps."
   fi
