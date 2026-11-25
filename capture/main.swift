@@ -8,7 +8,9 @@
 // Writes <out-dir>/mic.wav, system.wav, capture.json (timing) and levels.json
 // (live peaks). Prints "ready" on stdout once both streams run. Stops on
 // SIGTERM/SIGINT, always within ~2 s. A file <out-dir>/restart-system makes it
-// rebuild the system tap (read and deleted within 2 s).
+// rebuild the system tap (read and deleted within 2 s). It also rebuilds a track
+// on its own when its audio stops arriving, or when the system track stays
+// silent while other apps play audio (`SilenceWatch`).
 //
 // Both tracks use plain Core Audio IOProcs and are rebuilt whenever the device,
 // sample rate or format changes (e.g. Bluetooth earbuds switching to headset
@@ -65,6 +67,7 @@ final class TrackWriter {
     private var peakMax: Float = 0
     private var filledRecent: Int64 = 0
     private var writtenRecent: Int64 = 0
+    private var lastData: Double?
 
     init(name: String, url: URL) throws {
         self.name = name
@@ -82,6 +85,7 @@ final class TrackWriter {
     func append(_ buffer: AVAudioPCMBuffer, hostTime: UInt64) {
         lock.lock(); defer { lock.unlock() }
         guard let file, buffer.frameLength > 0 else { return }
+        lastData = hostNow()
 
         if converter == nil || converterInput != buffer.format {
             converter = AVAudioConverter(from: buffer.format, to: targetFormat)
@@ -143,6 +147,9 @@ final class TrackWriter {
             left -= Int64(n)
         }
     }
+
+    /// Host time of the last buffer from the device (nil: none yet).
+    var lastDataHost: Double? { lock.lock(); defer { lock.unlock() }; return lastData }
 
     /// Peaks and gap-filled share since the last call, plus the max peak since start.
     func takeLevels() -> [String: Any] {
@@ -264,6 +271,7 @@ class HALCapture {
     private var activeSignature: String?
     private var rebuildTimes: [Double] = []
     private(set) var rebuilds = 0
+    private(set) var lastStartHost = 0.0 // last successful start (0: not started yet)
 
     // Rate check state (ioQueue only)
     private var rcStart = 0.0, rcLast = 0.0, rcFrames = 0.0, rcIgnoreUntil = 0.0
@@ -307,6 +315,7 @@ class HALCapture {
         }
         addListeners()
         activeSignature = signature()
+        lastStartHost = hostNow()
         log("\(name): recording at \(Int(fmt.sampleRate)) Hz, \(fmt.channelCount) ch")
     }
 
@@ -459,6 +468,71 @@ final class SystemCapture: HALCapture {
 
     // The tap is the aggregate's last input stream.
     override func pickBuffer(_ abl: UnsafeMutableAudioBufferListPointer) -> AudioBuffer { abl[abl.count - 1] }
+}
+
+// MARK: - Silence watch (pure: no Core Audio, testable on its own)
+
+/// Decides when a track should restart itself, without stopping the recording:
+/// - stall: no buffers from the device for `stallAfter` (its IOProc stopped);
+/// - silence (system track only): quiet for `firstRestart` while another app is
+///   playing audio. On 2026-11-25 the tap went silent for 44 min after a burst of
+///   Core Audio overloads (the speakers kept playing); a fresh tap recorded fine.
+///   A real pause in the call also triggers it; a rebuild costs well under a second
+///   of (silent) audio, and repeats back off: 20 s, then +40, +80, +160, every 300 s.
+struct SilenceWatch {
+    static let quietPeak = 0.003   // same threshold as the app's "quiet"
+    static let stallAfter = 10.0
+    static let firstRestart = 20.0
+    static let maxGap = 300.0
+
+    enum Action: Equatable { case none, restart(String), soundBack }
+
+    let silence: Bool
+    private var quietSince: Double?
+    private var nextAt = SilenceWatch.firstRestart // seconds of quiet at which to restart next
+    private var step = SilenceWatch.firstRestart
+    private var restarted = false                  // auto restart in this quiet stretch
+    private var lastStall = -Double.infinity
+
+    init(silence: Bool) { self.silence = silence }
+
+    /// Called every levels tick. `lastStart` 0 = not started yet (or still starting).
+    mutating func tick(now: Double, peak: Double, lastData: Double?, lastStart: Double,
+                       othersPlaying: () -> Bool) -> Action {
+        guard lastStart > 0 else { return .none }
+        let since = max(lastData ?? 0, lastStart, lastStall)
+        if now - since >= SilenceWatch.stallAfter {
+            lastStall = now
+            return .restart("no audio from the device for \(Int(now - max(lastData ?? 0, lastStart))) s")
+        }
+        guard silence else { return .none }
+        if peak >= SilenceWatch.quietPeak {
+            let wasRestarted = restarted
+            quietSince = nil; nextAt = SilenceWatch.firstRestart; step = SilenceWatch.firstRestart; restarted = false
+            return wasRestarted ? .soundBack : .none
+        }
+        let start = quietSince ?? now
+        quietSince = start
+        let quiet = now - start
+        guard quiet >= nextAt, othersPlaying() else { return .none }
+        step = min(step * 2, SilenceWatch.maxGap)
+        nextAt = quiet + step
+        restarted = true
+        return .restart("silent for \(Int(quiet)) s while other apps play audio")
+    }
+}
+
+/// Is any process other than us sending audio to an output (macOS 14.2+ process objects)?
+func othersPlayingAudio() -> Bool {
+    let me = getpid()
+    for p in getIDs(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList) {
+        var running: UInt32 = 0
+        guard getProp(p, kAudioProcessPropertyIsRunningOutput, globalScope, &running) == noErr, running != 0 else { continue }
+        var pid: pid_t = 0
+        if getProp(p, kAudioProcessPropertyPID, globalScope, &pid) == noErr, pid == me { continue }
+        return true
+    }
+    return false
 }
 
 // MARK: - Microphone via an IOProc on the input device (shared; other apps unaffected)
@@ -631,12 +705,26 @@ let restartURL = outDir.appendingPathComponent("restart-system")
 // Live levels for `meet status`
 let levelsTimer = DispatchSource.makeTimerSource(queue: .main)
 levelsTimer.schedule(deadline: .now() + 2, repeating: 2)
+var micWatch = SilenceWatch(silence: false) // mic silence is normal (muted); only stalls
+var sysWatch = SilenceWatch(silence: true)
+
+func watch(_ w: inout SilenceWatch, _ cap: HALCapture, _ writer: TrackWriter, _ levels: [String: Any]) {
+    switch w.tick(now: hostNow(), peak: levels["peak_recent"] as? Double ?? 0, lastData: writer.lastDataHost,
+                  lastStart: cap.lastStartHost, othersPlaying: othersPlayingAudio) {
+    case .restart(let why): cap.scheduleRebuild(why, force: true)
+    case .soundBack: log("\(cap.name): sound again after an automatic restart")
+    case .none: break
+    }
+}
+
 levelsTimer.setEventHandler {
     if FileManager.default.fileExists(atPath: restartURL.path) {
         try? FileManager.default.removeItem(at: restartURL)
         sys.scheduleRebuild("restart requested", force: true)
     }
     var m = micWriter.takeLevels(), y = sysWriter.takeLevels()
+    watch(&micWatch, mic, micWriter, m)
+    watch(&sysWatch, sys, sysWriter, y)
     m["rebuilds"] = mic.rebuilds
     y["rebuilds"] = sys.rebuilds
     writeJSON(["updated_at": isoNow(), "mic": m, "system": y], to: levelsURL)
