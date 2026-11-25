@@ -138,7 +138,9 @@ final class Model: ObservableObject {
     @Published var inputs: Inputs?        // for the mic picker; loaded when the panel opens
     @Published var now = Date()
     @Published var quietFor: TimeInterval = 0
+    @Published var systemHeard = false    // the system track had sound at some point in this recording
 
+    static let silentAlert: TimeInterval = 30       // system audio silent this long in a call -> banner with Restart
     static let quietAlert: TimeInterval = 15 * 60   // no meeting audio for this long -> warn
     static let quietRepeat: TimeInterval = 30 * 60
     static let longAlert: TimeInterval = 3 * 3600   // then hourly reminders
@@ -228,16 +230,18 @@ final class Model: ObservableObject {
         guard let r = s.recording, r.alive else {
             recordingID = nil
             quietFor = 0
+            systemHeard = false
             return
         }
         if r.id != recordingID { // new recording: reset the watchdog
             recordingID = r.id
             lastSound = Date()
+            systemHeard = false
             lastQuietAlert = .distantPast
             longAlertsSent = 0
         }
         // "Meeting audio" = the system track; the mic hears the room even after a call ends.
-        if let lv = r.levels, lv.system.peak_recent > 0.003 { lastSound = Date() }
+        if let lv = r.levels, lv.system.peak_recent > 0.003 { lastSound = Date(); systemHeard = true }
         quietFor = Date().timeIntervalSince(lastSound)
         if quietFor >= Model.quietAlert, Date().timeIntervalSince(lastQuietAlert) >= Model.quietRepeat {
             lastQuietAlert = Date()
@@ -282,6 +286,11 @@ final class Model: ObservableObject {
         perform("Saving tags…", ["tag", id, "--tags=\(tags)"], onSuccess: done)
     }
     func retry(_ id: String) { perform("Retrying…", ["retry", id]) }
+    /// A fresh system-audio tap without stopping (`meet restart-audio`). On failure (e.g. a
+    /// recording started before the recorder supported it) the panel opens with the error.
+    func restartSystemAudio() {
+        perform("Restarting audio…", ["restart-audio"], onFailure: { self.showPanel?() })
+    }
 
     /// meetbar://start?name=…  /  meetbar://stop?tags=…
     func handle(_ url: URL) {
@@ -565,6 +574,18 @@ struct Panel: View {
                     .help("Recording from \(mic)")
             }
             LevelRow(label: "System", levels: r.levels?.system, elapsed: model.elapsed)
+            if model.quietFor >= Model.silentAlert {
+                // Under the System bar, lined up with it, like the mic name.
+                HStack(spacing: 6) {
+                    Text("No sound for \(hms(model.quietFor))").monospacedDigit().foregroundStyle(.secondary)
+                    Button("Restart system audio") { model.restartSystemAudio() }
+                        .buttonStyle(.link)
+                        .disabled(model.busy != nil)
+                        .help("Starts a fresh system audio capture. The recording continues.")
+                }
+                .font(.caption)
+                .padding(.leading, 58)
+            }
             if model.isQuiet {
                 Label("No meeting audio for \(Int(model.quietFor / 60)) min. Did the meeting end?",
                       systemImage: "exclamationmark.triangle.fill")
@@ -818,8 +839,9 @@ struct TagField: NSViewRepresentable {
 // MARK: - Recording safeguards
 // "Don't forget it's recording" reminders on top of the menu bar timer: a thin bar
 // along the bottom of every screen; a check-in panel after an hour (then every 30 min
-// after the last answer) or when the watchdog finds no meeting audio; and a "call
-// ended?" banner when a meeting app that was on the mic lets go of it.
+// after the last answer) or when the watchdog finds no meeting audio; a "call
+// ended?" banner when a meeting app that was on the mic lets go of it; and a
+// "no system audio" banner with Restart when the system track goes silent in a call.
 // Stop & save is the panel's Stop recording (`model.stop()`).
 
 /// A panel that never takes focus from the app the user is in (e.g. Teams).
@@ -966,6 +988,32 @@ struct CallEnded: View {
     }
 }
 
+/// While recording a call, the system track has been silent for `Model.silentAlert`: the others
+/// may not be getting recorded. Restart = a fresh system-audio tap; the recording continues.
+struct SystemSilent: View {
+    @ObservedObject var model: Model
+    let dismiss: () -> Void
+    let restart: () -> Void
+
+    var body: some View {
+        BannerCard(symbol: "speaker.slash.fill", tint: .orange,
+                   headline: "No system audio for \(hms(model.quietFor))",
+                   subtitle: "Recording \"\(model.recording?.name ?? "")\" · \(hms(model.elapsed))") {
+            Text("If others are talking, their side isn't being recorded. Restarting keeps the recording going.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 38)
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Dismiss", action: dismiss).buttonStyle(.bordered)
+                Button("Restart system audio", action: restart)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.busy != nil)
+            }
+        }
+    }
+}
+
 struct CheckIn: View {
     @ObservedObject var model: Model
     let quiet: Bool
@@ -1016,6 +1064,13 @@ final class Safeguards: NSObject, NSWindowDelegate {
     private var lastMicCheck = Date.distantPast
     private var leaving = false                  // a call app was gone at the last read; confirming
     private var askedCallEnded = false           // the open panel is CallEnded
+    private var onMic: [String: String] = [:]    // meeting apps on the mic at the last read
+    private var sawCallApp = false               // a meeting app was on the mic during this recording
+
+    // System silent: banner once per silent stretch, at `Model.silentAlert` of quiet; again
+    // `silentAlert` after a Restart if it's still silent. Re-armed when sound comes back.
+    private var nextSilentAlert = Model.silentAlert // in Model.quietFor seconds
+    private var askedSilent = false              // the open panel is SystemSilent
     /// Stop & save from CallEnded: the next meeting may already be on the mic, so keep suggesting it.
     var onCallEndedStop: (() -> Void)?
 
@@ -1035,19 +1090,54 @@ final class Safeguards: NSObject, NSWindowDelegate {
             callApps = [:]
             lastMicCheck = .distantPast
             leaving = false
+            onMic = [:]
+            sawCallApp = false
+            nextSilentAlert = Model.silentAlert
         }
         bars.show(model.isQuiet ? .systemOrange : .systemRed)
         if model.isQuiet, !wasQuiet { showCheckIn(quiet: true) }
         wasQuiet = model.isQuiet
         if model.elapsed >= nextCheckIn { showCheckIn(quiet: false) }
         checkCall()
+        checkSilence()
+    }
+
+    /// "In a call" = a meeting app is on the mic now, or (an app we don't detect) none ever was
+    /// but system audio was flowing earlier. Not after a known call app left: that's CallEnded's
+    /// question, and an in-person recording (never any system audio) never asks.
+    private func checkSilence() {
+        guard model.quietFor >= Model.silentAlert else { // sound is back
+            nextSilentAlert = Model.silentAlert
+            if askedSilent { closeCheckIn() }
+            return
+        }
+        guard model.quietFor >= nextSilentAlert, !askedCallEnded else { return }
+        guard !onMic.isEmpty || (!sawCallApp && model.systemHeard) else { return }
+        nextSilentAlert = .infinity
+        showSilent()
+    }
+
+    /// Takes over an open check-in; CallEnded takes over this one.
+    private func showSilent() {
+        closeCheckIn()
+        let view = NSHostingView(rootView: SystemSilent(model: model,
+                                                        dismiss: { [weak self] in self?.closeCheckIn() },
+                                                        restart: { [weak self] in
+                                                            guard let self else { return }
+                                                            self.nextSilentAlert = self.model.quietFor + Model.silentAlert
+                                                            self.model.restartSystemAudio()
+                                                            self.closeCheckIn()
+                                                        }))
+        panel = showFloatingPanel(view, delegate: self, borderless: true)
+        askedSilent = true
     }
 
     private func checkCall() {
         let now = Date()
         guard now.timeIntervalSince(lastMicCheck) >= (leaving ? Self.micConfirm : Self.micCheck) else { return }
         lastMicCheck = now
-        let onMic = MeetingDetector.micUse().apps
+        onMic = MeetingDetector.micUse().apps
+        if !onMic.isEmpty { sawCallApp = true }
         callApps.merge(onMic) { a, _ in a }
         let gone = callApps.keys.filter { onMic[$0] == nil }.sorted()
         guard let app = gone.first.flatMap({ callApps[$0] }) else { leaving = false; return }
@@ -1094,6 +1184,7 @@ final class Safeguards: NSObject, NSWindowDelegate {
 
     private func closeCheckIn() {
         askedCallEnded = false
+        askedSilent = false
         guard let p = panel else { return }
         panel = nil
         p.orderOut(nil)

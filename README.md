@@ -115,6 +115,8 @@ While recording, a thin red bar runs along the bottom of every screen (orange wh
 
 **So you don't forget to stop:** while recording, if Teams, Zoom, FaceTime, Slack or a browser was using the mic and lets go of it (you left the call), a panel asks "*App* call ended?" within a few seconds, with **Keep recording** and **Stop & save**. It only asks, it never stops on its own. Keep recording means it asks again only if that app picks up the mic and lets go again. After **Stop & save**, an app already on the mic for your next call is suggested for recording as usual. Recordings where no meeting app used the mic (in person) never ask. A browser with another tab still using the mic counts as still in the call.
 
+**So the other side doesn't go missing:** while recording a call (Teams, Zoom, FaceTime, Slack or a browser on the mic, or any app whose audio was being recorded earlier), if the system audio has been silent for 30 seconds, a panel says "No system audio for 0:30" with **Dismiss** and **Restart system audio**. Restart starts a fresh system-audio capture without stopping the recording (the gap stays silent, timestamps stay aligned). If it's still silent 30 seconds later, it asks again; otherwise it asks once per silent stretch and closes itself when sound comes back. While it's silent, the panel also shows "No sound for …" under the System bar with a **Restart system audio** link, and `meet restart-audio` does the same from the terminal. Recordings where no meeting app used the mic and no system audio ever played (in person) never ask. A real pause in the call (everyone muted) also triggers it; Dismiss, or Restart, which is harmless.
+
 The app is a front end for the `meet` command: it runs `meet start`, `meet stop`, `meet status --json` and so on, so the app and the terminal always agree. You can start in one and stop in the other.
 
 **Hotkeys, Raycast, Shortcuts:** the app handles `meetbar://` links:
@@ -141,6 +143,7 @@ The slug is made so Obsidian links always work: lowercase letters and digits onl
 - `meet stop --tags-later` doesn't ask; the transcript waits (up to 10 min) for `meet tag --tags "pricing, q4"` (or `--tags ""` for none). This is what the menu bar app uses.
 - `meet stop --wait` transcribes in the foreground.
 - `meet start <name> --keep-audio` or `meet stop --keep-audio` keeps the WAVs after success.
+- `meet restart-audio` restarts the system-audio capture of the running recording without stopping it (when the other side went silent). A recording started before this update can't do it; stop and start instead.
 - `meet retry [id]` re-runs a failed or interrupted transcription (latest by default).
 - `meet doctor` checks the setup and lists input devices.
 - `meet config` shows the settings; `meet config --inbox <dir>` (or `--mic`, `--prompt`) changes them, `meet config --get MEET_INBOX` prints one.
@@ -251,6 +254,7 @@ Notes:
 ### While recording
 
 - **`system: silent ⚠️` while people are talking:** the System Audio Recording permission for `meet-capture` is missing (System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only). macOS records silence instead of failing.
+- **The other side went silent mid-call** (it was recording fine before): click **Restart system audio** in the panel or run `meet restart-audio`. If it stays silent, check the meeting app's speaker setting and `~/Library/Logs/meet/meet.log`.
 - **No "Me" lines:** check `meet doctor` for the input devices, and set `MEET_MIC` to the mic your meeting app actually uses. Bluetooth mics send silence while you're not talking, so occasional gaps are normal.
 - **macOS asks for permissions again:** the recorder was rebuilt (each build is re-signed). Allow once more.
 - **Calendar names stopped filling in:** open the ⋯ menu. **Allow Calendar access…** means macOS hasn't been asked for this version of the app yet (say, the prompt at launch was closed without answering); click it and allow; **Open Privacy Settings…** means access is off for Meet Transcriber in System Settings → Privacy & Security → Calendars. A name is only filled in for an event that starts within 5 minutes of when you joined, or one already going (not ending within 5 minutes, at most 4 hours long); all-day, declined and cancelled events are skipped.
