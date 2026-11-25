@@ -639,5 +639,30 @@ class PrivacyTests(unittest.TestCase):
                 meet.RECORDINGS = old
 
 
+class RestartAudioTests(unittest.TestCase):
+    def test_recorder_takes_the_request(self):
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            req = Path(tmp) / meet.RESTART_FILE
+
+            def recorder():  # what meet-capture does on its 2 s levels tick
+                for _ in range(50):
+                    if req.exists():
+                        req.unlink()
+                        return
+                    threading.Event().wait(0.02)
+
+            t = threading.Thread(target=recorder)
+            t.start()
+            self.assertTrue(meet.request_restart(tmp, wait=2))
+            t.join()
+            self.assertFalse(req.exists())
+
+    def test_old_recorder_leaves_no_request_behind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(meet.request_restart(tmp, wait=0.2))
+            self.assertFalse((Path(tmp) / meet.RESTART_FILE).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

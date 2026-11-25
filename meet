@@ -5,6 +5,7 @@
   meet stop [--tags a,b | --tags-later] [--keep-audio] [--wait]
   meet tag [recording-id] --tags a,b     tags for a recording stopped with --tags-later
   meet status [--json]
+  meet restart-audio     restart system audio capture (keeps recording), e.g. when it went silent
   meet retry [recording-id] [--wait]
   meet doctor            check the setup and list input devices
   meet inputs [--json]   input devices and which one the next recording uses
@@ -58,6 +59,8 @@ BLEED_RUN = 4           # word runs this long echoed from "Them" are removed fro
 BLEED_SHARE = 0.6       # "Me" segments with this share of words echoed from "Them" are dropped
 BLEED_QUIET = 0.5       # "Me" overlapping "Them" at < this x your normal loudness is dropped
 TAG_WAIT = 10 * 60      # after a --tags-later stop, wait this long (from the stop) for `meet tag`
+RESTART_FILE = "restart-system"  # dropped in the recording dir; the recorder rebuilds its system tap
+RESTART_WAIT = 5.0      # the recorder checks for it every 2 s
 
 
 # ---------------------------------------------------------------- utilities
@@ -942,6 +945,41 @@ def kill_strays():
             pass
 
 
+def request_restart(rec_dir, wait=RESTART_WAIT):
+    """Ask the recorder to rebuild its system-audio tap. True once it picked up the request
+    (it deletes the file); False if it didn't (a recorder built before this existed), and
+    then the file is removed so it can't fire later."""
+    req = Path(rec_dir) / RESTART_FILE
+    with open_private(req, os.O_WRONLY | os.O_CREAT | os.O_TRUNC) as f:
+        f.write("system\n")
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if not req.exists():
+            return True
+        time.sleep(0.1)
+    try:
+        req.unlink()
+    except FileNotFoundError:
+        return True  # taken just now
+    return False
+
+
+def cmd_restart_audio(args):
+    cur = read_json(CURRENT)
+    if not cur:
+        fail("Not recording.")
+    if not pid_alive(cur.get("pid")):
+        fail("The recorder isn't running. Run `meet stop` to transcribe what was captured.")
+    rec_dir = resolve_recording(cur.get("dir", ""))
+    if rec_dir is None or not rec_dir.exists():
+        fail(f"Recording folder is missing or outside {RECORDINGS}.")
+    if not request_restart(rec_dir):
+        fail("This recording's recorder can't restart audio (it was started before this update). "
+             "Stop and start the recording instead.")
+    log(f"{cur['id']}: system audio restart requested")
+    print("🔄 Restarting system audio capture. The recording continues.")
+
+
 def cmd_stop(args):
     cur = read_json(CURRENT)
     if not cur:
@@ -1268,6 +1306,7 @@ def main():
     s.add_argument("--tags", default="", help='comma or space separated; "" for none')
     s = sub.add_parser("status", help="am I recording?")
     s.add_argument("--json", action="store_true", help="machine-readable output")
+    sub.add_parser("restart-audio", help="restart system audio capture without stopping (e.g. when it went silent)")
     sub.add_parser("doctor", help="check the setup and list input devices")
     s = sub.add_parser("inputs", help="list input devices and which one the next recording uses")
     s.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1287,7 +1326,8 @@ def main():
         process(Path(args.dir))
     else:
         {"start": cmd_start, "stop": cmd_stop, "status": cmd_status, "retry": cmd_retry,
-         "doctor": cmd_doctor, "config": cmd_config, "tag": cmd_tag, "inputs": cmd_inputs}[args.cmd](args)
+         "doctor": cmd_doctor, "config": cmd_config, "tag": cmd_tag, "inputs": cmd_inputs,
+         "restart-audio": cmd_restart_audio}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@
 // Mic: the default input, or the first input whose name contains $MEET_MIC.
 // Writes <out-dir>/mic.wav, system.wav, capture.json (timing) and levels.json
 // (live peaks). Prints "ready" on stdout once both streams run. Stops on
-// SIGTERM/SIGINT, always within ~2 s.
+// SIGTERM/SIGINT, always within ~2 s. A file <out-dir>/restart-system makes it
+// rebuild the system tap (read and deleted within 2 s).
 //
 // Both tracks use plain Core Audio IOProcs and are rebuilt whenever the device,
 // sample rate or format changes (e.g. Bluetooth earbuds switching to headset
@@ -623,10 +624,18 @@ func trackInfo(_ w: TrackWriter) -> [String: Any] {
 
 writeJSON(["started_at": startedAt, "pid": Int(getpid())], to: captureURL)
 
+// `meet restart-audio` drops this file to ask for a fresh system tap (the track went
+// silent mid-meeting). Checked with the levels; deleting it tells the CLI it was seen.
+let restartURL = outDir.appendingPathComponent("restart-system")
+
 // Live levels for `meet status`
 let levelsTimer = DispatchSource.makeTimerSource(queue: .main)
 levelsTimer.schedule(deadline: .now() + 2, repeating: 2)
 levelsTimer.setEventHandler {
+    if FileManager.default.fileExists(atPath: restartURL.path) {
+        try? FileManager.default.removeItem(at: restartURL)
+        sys.scheduleRebuild("restart requested", force: true)
+    }
     var m = micWriter.takeLevels(), y = sysWriter.takeLevels()
     m["rebuilds"] = mic.rebuilds
     y["rebuilds"] = sys.rebuilds
