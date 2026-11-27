@@ -4,6 +4,16 @@ Local meeting recorder + transcriber for macOS. It records your mic and the Mac'
 
 If a `CLAUDE.local.md` exists next to this file, read it: it holds the current user's personal setup and open items (git-ignored).
 
+## Answer style (chat replies only)
+1. First line = the answer or next action. No preamble.
+2. Multi-step: numbered, one action per step, max 5.
+3. End with one concrete "Next:" step under 2 min (skip if nothing to do).
+4. No tangents: offer extras as one short question at the end.
+5. Real time estimates ("~10 min"). Errors: cause + fix, no apologies.
+6. No recap, no "hope this helps", no filler or hedges.
+7. Go longer only when I ask ("full answer", "explain", "go deeper", "why").
+8. Does not apply to files (docs, notes, tickets) or Slack/email drafts: those follow their own rules.
+
 ## Setting it up for a user
 
 **Already set up?** If `~/.config/meet/config` exists, skip these setup steps and don't re-check or re-ask anything here, unless the user asks to set up, reinstall or reconfigure meet. For code changes, go to the sections below.
